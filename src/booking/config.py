@@ -58,6 +58,7 @@ class AppConfig:
     end_time: str
     login_method: str = "alumni"
     venue_id: str = ""  # numeric ID from /venue/venue-reservation/<id>
+    save_captcha: bool = False  # save captcha images to data/captcha/ for benchmarking
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
     selectors: SelectorConfig = field(default_factory=SelectorConfig)
@@ -108,6 +109,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         end_time=str(raw["end_time"]),
         login_method=str(raw.get("login_method", "alumni")),
         venue_id=str(raw.get("venue_id", "")),
+        save_captcha=bool(raw.get("save_captcha", False)),
         browser=_parse_browser(raw),
         captcha=_parse_captcha(raw),
         selectors=_parse_selectors(raw),

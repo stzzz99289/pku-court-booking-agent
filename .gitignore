@@ -24,3 +24,6 @@ user_config.yaml
 # OS
 .DS_Store
 Thumbs.db
+
+# data
+data/

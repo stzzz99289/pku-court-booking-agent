@@ -11,6 +11,9 @@ end_time: "11"
 # alumni | iaaa (IAAA not implemented in code yet)
 login_method: "alumni"
 
+# Set to true to save all encountered captcha images to data/captcha/ for benchmarking.
+save_captcha: false
+
 # Optional: third-party captcha API key (keep in this file only)
 captcha:
   api_key: ""

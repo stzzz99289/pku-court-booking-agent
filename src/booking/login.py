@@ -91,7 +91,8 @@ async def ensure_logged_in(page: Page, cfg: AppConfig, solver: CaptchaSolver) ->
             refresh = _sel(cfg, "login_captcha_refresh")
             if refresh:
                 await page.locator(refresh).first.click()
-            await solve_and_fill(page, cap_img, cap_in, solver)
+            await solve_and_fill(page, cap_img, cap_in, solver,
+                                   save_captcha=cfg.save_captcha, captcha_type="login")
 
         # Submit and wait for the SPA to redirect away from the login page (JWT is stored on redirect).
         submit = _sel(cfg, "login_submit")

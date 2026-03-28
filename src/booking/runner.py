@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from .booking_flow import agree_and_submit_booking, select_booking_date, select_court_time, verify_booking
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
-from .captcha import make_solver
+from .captcha import make_solver, save_captcha_image
 from .config import AppConfig, load_config
 from .login import ensure_logged_in
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
@@ -85,6 +85,10 @@ async def run(user_config_path: Path, site_config_path: Path) -> BookingResult:
 
                     # Stage 5: detect click-captcha or verify booking success.
                     if await page.locator(".verifybox").first.is_visible():
+                        if cfg.save_captcha:
+                            img_loc = page.locator(".verify-img-panel img").first
+                            if await img_loc.count():
+                                save_captcha_image(await img_loc.screenshot(), "booking")
                         out = BookingResult(
                             True,
                             "Click-captcha appeared (请完成安全验证). Not yet automated — solve it manually or close the browser.",
