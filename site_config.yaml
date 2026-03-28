@@ -1,0 +1,39 @@
+# Site defaults: URLs, browser profile, captcha provider (non-secret), Playwright selectors.
+# Commit and update when the booking website UI changes.
+
+base_url: "https://epe.pku.edu.cn/venue/home"
+
+# Direct navigation to the court booking page (skips venue list click-through).
+# Set to the numeric ID from the URL: https://epe.pku.edu.cn/venue/venue-reservation/85
+venue_id: 85
+user_data_dir: "./.browser_profile"
+
+browser:
+  headless: false
+  slow_mo_ms: 0
+
+captcha:
+  provider: "manual"
+
+selectors:
+  # Top-right "登录" is a clickable generic/div, not an <a>, so role=link does not match.
+  login_button: 'text=/^登录$/'
+  login_mode_iaaa: 'text=校内师生登录'
+  login_mode_alumni: 'text=校友登录'
+  username_input: 'role=textbox[name="手机号"]'
+  password_input: 'role=textbox[name="密码"]'
+  login_captcha_image: 'img[src^="blob"]'
+  login_captcha_input: 'role=textbox[name="验证码"]'
+  login_captcha_refresh: ""
+  login_submit: 'role=button[name="登录"]'
+  # Optional explicit marker; if empty, code still treats visible 退出 / 欢迎您 as logged-in (saved session).
+  logged_in_indicator: ""
+
+  agreement_checkbox: "input.ivu-checkbox-input"
+  booking_submit: ".submit_order_box .btn"
+  booking_captcha_image: ""
+  booking_captcha_input: ""
+  proceed_to_pay: ""
+
+  user_page_url_substring: "user"
+  booking_success_indicator: ""
