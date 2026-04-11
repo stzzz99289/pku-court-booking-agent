@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from playwright.async_api import Page
 
@@ -8,6 +9,8 @@ from .captcha import CaptchaSolver, solve_and_fill
 from .config import AppConfig
 
 log = logging.getLogger(__name__)
+
+_LOGIN_CAPTCHA_MAX_RETRIES = 3
 
 
 def _sel(cfg: AppConfig, name: str) -> str:
@@ -91,8 +94,20 @@ async def ensure_logged_in(page: Page, cfg: AppConfig, solver: CaptchaSolver) ->
             refresh = _sel(cfg, "login_captcha_refresh")
             if refresh:
                 await page.locator(refresh).first.click()
-            await solve_and_fill(page, cap_img, cap_in, solver,
-                                   save_captcha=cfg.save_captcha, captcha_type="login")
+            # Retry loop: login captcha must be exactly 4 digits; refresh and re-solve otherwise.
+            for attempt in range(_LOGIN_CAPTCHA_MAX_RETRIES):
+                await solve_and_fill(page, cap_img, cap_in, solver,
+                                     save_captcha=cfg.save_captcha, captcha_type="login")
+                answer = await page.locator(cap_in).first.input_value()
+                if re.fullmatch(r"\d{4}", answer):
+                    break
+                log.warning("Login captcha answer %r is not 4 digits (attempt %d/%d), retrying.",
+                            answer, attempt + 1, _LOGIN_CAPTCHA_MAX_RETRIES)
+                if refresh:
+                    await page.locator(refresh).first.click()
+            else:
+                log.warning("Failed to get a valid 4-digit captcha answer after %d attempts; proceeding anyway.",
+                            _LOGIN_CAPTCHA_MAX_RETRIES)
 
         # Submit and wait for the SPA to redirect away from the login page (JWT is stored on redirect).
         submit = _sel(cfg, "login_submit")

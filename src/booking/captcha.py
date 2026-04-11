@@ -8,7 +8,7 @@ from typing import Protocol, runtime_checkable
 log = logging.getLogger(__name__)
 
 _CAPTCHA_DIR = Path("data/captcha")
-_MAX_CAPTCHA_FILES = 10
+_MAX_CAPTCHA_FILES = 100
 
 
 @runtime_checkable
@@ -19,7 +19,7 @@ class CaptchaSolver(Protocol):
 
 
 class ManualCaptchaSolver:
-    """Prompt on stdin (blocking); suitable for interactive runs."""
+    """Prompt on stdin (blocking); suitable for debug / interactive runs."""
 
     async def solve(self, image_bytes: bytes) -> str:
         # Print image size hint so the user knows a captcha arrived.
@@ -27,62 +27,11 @@ class ManualCaptchaSolver:
         return input().strip()
 
 
-class StubCaptchaSolver:
-    """Fixed answer for dry-run / tests only."""
+def save_captcha_image(image_bytes: bytes, captcha_type: str, label: str = "") -> None:
+    """Save a captcha PNG to data/captcha/{captcha_type}_{label_or_timestamp}.png.
 
-    def __init__(self, answer: str = "0000") -> None:
-        self._answer = answer
-
-    async def solve(self, image_bytes: bytes) -> str:
-        # Return the hardcoded stub answer and warn that this is not for production.
-        log.warning("StubCaptchaSolver returning fixed answer (not for production).")
-        return self._answer
-
-
-class EnvCaptchaSolver:
-    """Read answer from CAPTCHA_ANSWER env (useful for scripted local tests)."""
-
-    async def solve(self, image_bytes: bytes) -> str:
-        # Read the answer from the environment variable, raising if it is missing.
-        import os
-        v = os.environ.get("CAPTCHA_ANSWER", "").strip()
-        if not v:
-            raise RuntimeError("EnvCaptchaSolver requires CAPTCHA_ANSWER in the environment.")
-        return v
-
-
-class TwoCaptchaPlaceholderSolver:
-    """Reserved for a future 2Captcha API integration."""
-
-    def __init__(self, api_key: str) -> None:
-        self._api_key = api_key
-
-    async def solve(self, image_bytes: bytes) -> str:
-        # Raise until the real 2Captcha integration is implemented.
-        raise NotImplementedError(
-            "2Captcha integration is not implemented yet; set captcha.provider to "
-            "manual, stub, or env, or extend TwoCaptchaPlaceholderSolver."
-        )
-
-
-def make_solver(provider: str, api_key: str) -> CaptchaSolver:
-    # Instantiate the correct solver based on the provider name.
-    p = (provider or "manual").strip().lower()
-    if p in ("manual", ""):
-        return ManualCaptchaSolver()
-    if p == "stub":
-        return StubCaptchaSolver()
-    if p == "env":
-        return EnvCaptchaSolver()
-    if p in ("2captcha", "twocaptcha"):
-        return TwoCaptchaPlaceholderSolver(api_key=api_key)
-    raise ValueError(f"Unknown captcha provider: {provider!r}. Use manual, stub, env, or 2captcha (placeholder).")
-
-
-def save_captcha_image(image_bytes: bytes, captcha_type: str) -> None:
-    """Save a captcha PNG to data/captcha/{captcha_type}_{timestamp}.png.
-
-    Keeps at most _MAX_CAPTCHA_FILES files in the folder by deleting the oldest first.
+    If label is provided (e.g. the ground-truth answer), it is used in the filename
+    instead of a timestamp. Keeps at most _MAX_CAPTCHA_FILES files in the folder.
     """
     # Ensure the output directory exists.
     _CAPTCHA_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,9 +41,9 @@ def save_captcha_image(image_bytes: bytes, captcha_type: str) -> None:
     while len(existing) >= _MAX_CAPTCHA_FILES:
         existing.pop(0).unlink()
 
-    # Write the new file with a millisecond timestamp to keep names unique across runs.
-    timestamp = int(time.time() * 1000)
-    path = _CAPTCHA_DIR / f"{captcha_type}_{timestamp}.png"
+    # Use label (ground truth) if provided, otherwise fall back to timestamp.
+    suffix = label or str(int(time.time() * 1000))
+    path = _CAPTCHA_DIR / f"{captcha_type}_{suffix}.png"
     path.write_bytes(image_bytes)
     log.info("Saved captcha image: %s", path)
 
@@ -119,9 +68,8 @@ async def solve_and_fill(
     loc = page.locator(image_selector)
     await loc.wait_for(state="visible", timeout=60_000)
     png = await loc.screenshot()
-
-    if save_captcha:
-        save_captcha_image(png, captcha_type)
-
     text = await solver.solve(png)
     await page.locator(input_selector).fill(text)
+
+    if save_captcha:
+        save_captcha_image(png, captcha_type, label=text)

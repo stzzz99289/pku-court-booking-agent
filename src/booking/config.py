@@ -15,8 +15,9 @@ class BrowserConfig:
 
 @dataclass
 class CaptchaConfig:
-    provider: str = "manual"
-    api_key: str = ""
+    api_key: str = ""   # chaojiying login password
+    username: str = ""  # chaojiying account username
+    softid: str = ""    # chaojiying software ID from dashboard
 
 
 @dataclass
@@ -59,6 +60,7 @@ class AppConfig:
     login_method: str = "alumni"
     venue_id: str = ""  # numeric ID from /venue/venue-reservation/<id>
     save_captcha: bool = False  # save captcha images to data/captcha/ for benchmarking
+    debug: bool = False  # use manual stdin solver instead of API to save tokens
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
     selectors: SelectorConfig = field(default_factory=SelectorConfig)
@@ -110,6 +112,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         login_method=str(raw.get("login_method", "alumni")),
         venue_id=str(raw.get("venue_id", "")),
         save_captcha=bool(raw.get("save_captcha", False)),
+        debug=bool(raw.get("debug", False)),
         browser=_parse_browser(raw),
         captcha=_parse_captcha(raw),
         selectors=_parse_selectors(raw),
@@ -125,7 +128,11 @@ def _parse_browser(data: dict[str, Any]) -> BrowserConfig:
 def _parse_captcha(data: dict[str, Any]) -> CaptchaConfig:
     # Extract captcha settings from merged config dict.
     c = data.get("captcha") or {}
-    return CaptchaConfig(provider=str(c.get("provider", "manual")), api_key=str(c.get("api_key", "")))
+    return CaptchaConfig(
+        api_key=str(c.get("api_key", "")),
+        username=str(c.get("username", "")),
+        softid=str(c.get("softid", "")),
+    )
 
 
 def _parse_selectors(data: dict[str, Any]) -> SelectorConfig:

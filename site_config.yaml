@@ -5,15 +5,14 @@ base_url: "https://epe.pku.edu.cn/venue/home"
 
 # Direct navigation to the court booking page (skips venue list click-through).
 # Set to the numeric ID from the URL: https://epe.pku.edu.cn/venue/venue-reservation/85
-venue_id: 85
+venue_id: 85 # 54 tennis
+# venue_id: 64 
 user_data_dir: "./.browser_profile"
 
 browser:
   headless: false
   slow_mo_ms: 0
 
-captcha:
-  provider: "manual"
 
 selectors:
   # Top-right "登录" is a clickable generic/div, not an <a>, so role=link does not match.
@@ -33,7 +32,7 @@ selectors:
   booking_submit: ".submit_order_box .btn"
   booking_captcha_image: ""
   booking_captcha_input: ""
-  proceed_to_pay: ""
+  proceed_to_pay: ".btn-group .btn:not(.cancel)"
 
   user_page_url_substring: "user"
   booking_success_indicator: ""

@@ -27,3 +27,6 @@ Thumbs.db
 
 # data
 data/
+
+# claude info
+.claude/

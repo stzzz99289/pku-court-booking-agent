@@ -14,9 +14,13 @@ login_method: "alumni"
 # Set to true to save all encountered captcha images to data/captcha/ for benchmarking.
 save_captcha: false
 
-# Optional: third-party captcha API key (keep in this file only)
+# ChaoJiYing (超级鹰) captcha solver — https://www.chaojiying.com
+# Register an account, create a software ID in the dashboard, then fill in below.
+# Falls back to local ddddocr if the API returns an error.
 captcha:
-  api_key: ""
+  username: ""
+  api_key: ""   # your chaojiying login password
+  softid: ""    # software ID from your chaojiying dashboard
 
 # Optional: override anything from site_config.yaml, e.g.:
 # browser:
