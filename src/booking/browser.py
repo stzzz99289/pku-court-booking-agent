@@ -18,7 +18,7 @@ async def launch_persistent_context(cfg: AppConfig) -> tuple[BrowserContext, Pat
     try:
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data),
-            headless=cfg.browser.headless,
+            headless=cfg.headless,
             slow_mo=cfg.browser.slow_mo_ms,
             args=["--disable-blink-features=AutomationControlled"],
         )
@@ -30,8 +30,12 @@ async def launch_persistent_context(cfg: AppConfig) -> tuple[BrowserContext, Pat
 
 
 async def wait_until_user_closes_window(cfg: AppConfig, page: Page) -> None:
-    """In headed mode, block until the user closes the browser window."""
-    if cfg.browser.headless or page.is_closed():
+    """In headed mode, block until the user closes the browser window.
+
+    In headless mode this is a no-op so the runner can dispose the context
+    immediately after the result is printed.
+    """
+    if cfg.headless or page.is_closed():
         return
     log.info("Done. Close the browser window to exit the program.")
     await page.wait_for_event("close", timeout=0)

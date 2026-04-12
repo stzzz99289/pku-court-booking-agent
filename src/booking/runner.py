@@ -117,9 +117,11 @@ async def run(user_config_path: Path, site_config_path: Path) -> BookingResult:
                                 out = captcha_err
                             else:
                                 # Stage 6: confirm payment (free → done, paid → manual).
-                                out = await confirm_payment(page, cfg)
+                                # confirm_payment may switch `page` to a newly opened
+                                # payment tab and close the old reservation tab.
+                                page, out = await confirm_payment(page, cfg)
                     else:
-                        out = await confirm_payment(page, cfg)
+                        page, out = await confirm_payment(page, cfg)
 
         assert out is not None
         return out

@@ -11,8 +11,11 @@ end_time: "11"
 # alumni | iaaa (IAAA not implemented in code yet)
 login_method: "alumni"
 
-# Set to true to save all encountered captcha images to data/captcha/ for benchmarking.
-save_captcha: false
+# Run Chromium headless. In headless mode you only see status via terminal
+# output; the browser is auto-closed and the program exits when the flow ends.
+# Note: paid bookings cannot be completed in headless mode — the
+# wechat/alipay popup has nowhere to render. Use headed mode for those.
+headless: false
 
 # ChaoJiYing (超级鹰) captcha solver — https://www.chaojiying.com
 # Register an account, create a software ID in the dashboard, then fill in below.
@@ -24,4 +27,4 @@ captcha:
 
 # Optional: override anything from site_config.yaml, e.g.:
 # browser:
-#   headless: true
+#   slow_mo_ms: 150

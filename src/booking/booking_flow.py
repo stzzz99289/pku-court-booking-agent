@@ -43,6 +43,13 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
         text = (await btn.inner_text()).strip()
         available.append(text)
         if target in text:
+            # If the date is already selected (class "active"), the table is
+            # already loaded — clicking it again won't fire an API request, so
+            # skip the click to avoid a timeout on expect_response.
+            btn_cls = ((await btn.get_attribute("class")) or "").split()
+            if "active" in btn_cls:
+                log.info("Date %s is already selected, skipping click.", target)
+                return None
             log.info("Selecting date: %s", target)
             # Wait for the schedule API response before returning so the table is fresh.
             async with page.expect_response(
@@ -204,18 +211,44 @@ async def _read_system_error_modal(page: Page) -> str:
     return await page.evaluate(_SYSTEM_ERROR_MODAL_JS)
 
 
+def _find_trade_page(context) -> Page | None:
+    """Return the first page in `context` whose URL contains 'tradeNo=', or None.
+
+    On success the site opens the payment page in a NEW TAB (the original
+    reservation tab stays put), so we always scan the whole context rather
+    than trusting the original `page.url`.
+    """
+    for p in context.pages:
+        if "tradeNo=" in p.url:
+            return p
+    return None
+
+
 async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> BookingResult | None:
     """Solve the click-captcha that appears after submitting a booking.
 
     Screenshots the captcha image, sends it to click_solver.solve_click() to get
     coordinates, and clicks each point on the image. Retries if the captcha refreshes.
-    Returns None on success (captcha dialog disappears), or a BookingResult error.
+    Returns None on success, or a BookingResult error.
 
-    Also detects the '系统提示' rejection modal (e.g. '预约失败，您存在未支付的订单！')
-    which the site can pop up even after a correct captcha answer — in that case
-    we short-circuit with a rejection BookingResult instead of looping.
+    Success signals (checked in order):
+      1. A new tab with `tradeNo=` in its URL has opened — this is what actually
+         happens in practice; the site opens the payment page in a new window
+         rather than navigating in place.
+      2. The '系统提示' rejection modal appeared (e.g. '预约失败，您存在未支付的订单！')
+         — short-circuit with a rejection BookingResult instead of looping.
+      3. The `.verifybox` captcha dialog disappeared from the original page.
+
+    We don't rely on `verifybox.is_visible()` alone because after the captcha
+    is accepted the site leaves `.verifybox` in the DOM with `display: block`
+    but detaches its parent — Playwright still reports it as visible.
     """
+    ctx = page.context
     for attempt in range(_BOOKING_CAPTCHA_MAX_RETRIES):
+        # Trade page may already exist (e.g. instant acceptance before we check).
+        if _find_trade_page(ctx) is not None:
+            return None
+
         # A rejection modal may have already appeared before we get a chance to click.
         error_text = await _read_system_error_modal(page)
         if error_text:
@@ -268,41 +301,53 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             await img_loc.click(position={"x": x / dpr, "y": y / dpr})
             await asyncio.sleep(0.3)
 
-        # Wait for the captcha to either disappear (success), refresh (wrong answer),
-        # or be overtaken by a rejection modal (captcha accepted but booking denied).
-        await asyncio.sleep(1.5)
-        error_text = await _read_system_error_modal(page)
-        if error_text:
-            return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
-        if not await verifybox.is_visible():
-            return None  # Captcha dismissed — success.
+        # Poll for success conditions: trade page opened in a (new) tab, rejection
+        # modal, or captcha genuinely dismissed. Give the site time to react — the
+        # payment tab can take a couple of seconds to appear over a slow connection.
+        for _ in range(10):  # ~5 s at 0.5 s intervals.
+            await asyncio.sleep(0.5)
+            if _find_trade_page(ctx) is not None:
+                return None  # Payment page appeared — booking accepted.
+            error_text = await _read_system_error_modal(page)
+            if error_text:
+                return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
+            if not await verifybox.is_visible():
+                return None  # Captcha dismissed — success.
         log.warning("Click-captcha still visible after attempt %d/%d, retrying.",
                     attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
 
     return BookingResult(False, f"Failed to solve click-captcha after {_BOOKING_CAPTCHA_MAX_RETRIES} attempts.", {})
 
 
-async def confirm_payment(page: Page, cfg: AppConfig) -> BookingResult:
+async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResult]:
     """Handle the payment page that appears after the booking captcha is solved.
+
+    The site opens the payment page in a NEW tab, so we poll `context.pages` for
+    any page with `tradeNo=` in its URL and switch to it. Returns
+    (active_page, result) — the runner uses `active_page` for the shutdown
+    wait (headed mode) so the payment tab stays under the program's control.
 
     Reads the amount from the '请您支付' box, then clicks the pay button (which
     has a countdown like '支付 （255s）'). If the amount is 0, clicking pay
-    completes the booking in place — return success. If > 0, the site opens an
-    external payment window (wechat/alipay/unionpay) which we can't automate —
-    return success with a note asking the user to finish payment manually.
+    completes the booking in place. If > 0, the site opens an external payment
+    window (wechat/alipay/unionpay) which we can't automate — return success
+    with a note asking the user to finish payment manually.
 
     If the site rejects the booking after the captcha (e.g. '预约失败，您存在
     未支付的订单！'), a '系统提示' modal appears instead of the payment page —
     in that case return a failure result with the modal's body text.
     """
-    # After captcha the SPA either navigates to `?tradeNo=...` (success) or pops
-    # a '系统提示' modal explaining why the booking was rejected. Poll for both.
+    ctx = page.context
+    trade_page: Page | None = None
+    # After captcha the SPA either opens a new tab with `?tradeNo=...` or pops
+    # a '系统提示' modal explaining the rejection. Poll for both.
     for _ in range(50):  # ~15 s at 0.3 s intervals.
-        if "tradeNo=" in page.url:
+        trade_page = _find_trade_page(ctx)
+        if trade_page is not None:
             break
         error_text = await _read_system_error_modal(page)
         if error_text:
-            return BookingResult(
+            return page, BookingResult(
                 False,
                 f"Booking rejected by site: {error_text}",
                 {"url": page.url},
@@ -310,6 +355,24 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> BookingResult:
         await asyncio.sleep(0.3)
     else:
         log.warning("Neither payment URL nor error modal appeared within the timeout.")
+
+    # If the payment page opened in a new tab, switch to it and close the old
+    # reservation tab so only one window is left when the program ends.
+    if trade_page is not None and trade_page is not page:
+        log.info("Payment page opened in new tab: %s", trade_page.url)
+        try:
+            await page.close()
+        except Exception:
+            pass
+        page = trade_page
+        await page.bring_to_front()
+
+    # Wait for the Vue SPA to finish loading data (the <b> amount defaults to
+    # "0" until the API response populates it).
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10_000)
+    except Exception:
+        log.warning("Trade page did not reach networkidle within 10 s; reading amount anyway.")
 
     # Scope the amount lookup to the '请您支付' key_val_box so it doesn't match other boxes.
     amount_text = await page.evaluate(
@@ -319,33 +382,41 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> BookingResult:
         " const b = box.querySelector('b'); return b ? b.textContent.trim() : null; }"
     )
     if amount_text is None:
-        return BookingResult(False, "Payment page reached but '请您支付' amount not found.", {"url": page.url})
+        return page, BookingResult(False, "Payment page reached but '请您支付' amount not found.", {"url": page.url})
     try:
         amount = float(amount_text)
     except ValueError:
-        return BookingResult(False, f"Could not parse payment amount: {amount_text!r}.", {"url": page.url})
+        return page, BookingResult(False, f"Could not parse payment amount: {amount_text!r}.", {"url": page.url})
     log.info("Payment amount: ¥%s", amount)
 
     pay_sel = _sel(cfg, "proceed_to_pay")
     if not pay_sel:
-        return BookingResult(False, "selectors.proceed_to_pay is not configured.", {"url": page.url})
+        return page, BookingResult(False, "selectors.proceed_to_pay is not configured.", {"url": page.url})
     pay_btn = page.locator(pay_sel).first
     if not await pay_btn.count():
-        return BookingResult(False, f"Pay button not found (selector: {pay_sel}).", {"url": page.url})
+        return page, BookingResult(False, f"Pay button not found (selector: {pay_sel}).", {"url": page.url})
     log.info("Clicking pay button (amount ¥%s).", amount)
     await pay_btn.click()
 
     if amount > 0:
-        return BookingResult(
-            True,
-            f"Booking reserved (¥{amount}). Please complete the payment manually "
-            f"in the wechat/alipay/unionpay popup.",
-            {"amount": amount, "url": page.url},
-        )
+        if cfg.headless:
+            # In headless mode the wechat/alipay popup has nowhere to render —
+            # the reservation is held, but the user will have to pay through the
+            # site's orders page in a normal browser.
+            msg = (
+                f"Booking reserved (¥{amount}). Headless mode cannot complete "
+                f"payment — open the site in a browser to pay from the orders page."
+            )
+        else:
+            msg = (
+                f"Booking reserved (¥{amount}). Please complete the payment manually "
+                f"in the wechat/alipay/unionpay popup."
+            )
+        return page, BookingResult(True, msg, {"amount": amount, "url": page.url})
 
     # Free booking — give the SPA a moment to finalize after the click.
     await asyncio.sleep(1.5)
-    return BookingResult(
+    return page, BookingResult(
         True,
         "Free booking confirmed (amount ¥0).",
         {"amount": amount, "url": page.url},

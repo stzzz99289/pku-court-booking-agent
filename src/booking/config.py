@@ -9,7 +9,6 @@ import yaml
 
 @dataclass
 class BrowserConfig:
-    headless: bool = False
     slow_mo_ms: int = 0
 
 
@@ -61,6 +60,7 @@ class AppConfig:
     venue_id: str = ""  # numeric ID from /venue/venue-reservation/<id>
     save_captcha: bool = False  # save captcha images to data/captcha/ for benchmarking
     debug: bool = False  # use manual stdin solver instead of API to save tokens
+    headless: bool = False  # run Chromium headless; on finish, auto-close the browser and exit
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
     selectors: SelectorConfig = field(default_factory=SelectorConfig)
@@ -113,6 +113,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         venue_id=str(raw.get("venue_id", "")),
         save_captcha=bool(raw.get("save_captcha", False)),
         debug=bool(raw.get("debug", False)),
+        headless=bool(raw.get("headless", False)),
         browser=_parse_browser(raw),
         captcha=_parse_captcha(raw),
         selectors=_parse_selectors(raw),
@@ -122,7 +123,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
 def _parse_browser(data: dict[str, Any]) -> BrowserConfig:
     # Extract browser settings from merged config dict.
     b = data.get("browser") or {}
-    return BrowserConfig(headless=bool(b.get("headless", False)), slow_mo_ms=int(b.get("slow_mo_ms", 0)))
+    return BrowserConfig(slow_mo_ms=int(b.get("slow_mo_ms", 0)))
 
 
 def _parse_captcha(data: dict[str, Any]) -> CaptchaConfig:
