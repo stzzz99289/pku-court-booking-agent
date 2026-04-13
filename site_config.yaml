@@ -13,6 +13,12 @@ headless: true  # run Chromium headless; when true, browser auto-closes on finis
 save_captcha: false  # save captcha images to data/captcha/ for benchmarking
 debug: false  # use manual stdin solver instead of API solvers
 
+# Scheduled booking: wait until a precise time before starting the booking flow.
+# Useful for booking courts that become available at a specific time (e.g. 12:00:00).
+scheduled_mode: false
+scheduled_time: "120000"        # Target time in HHMMSS 24-h format
+scheduled_window_minutes: 3     # Program must start within this many minutes before scheduled_time
+
 browser:
   slow_mo_ms: 0
 

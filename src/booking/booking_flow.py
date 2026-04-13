@@ -49,6 +49,13 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
             btn_cls = ((await btn.get_attribute("class")) or "").split()
             if "active" in btn_cls:
                 log.info("Date %s is already selected, skipping click.", target)
+                # Wait for the schedule table to be populated (it may still be loading after a page refresh).
+                try:
+                    await page.locator(".spaceTable table thead td").nth(1).wait_for(
+                        state="visible", timeout=10_000
+                    )
+                except Exception:
+                    log.warning("Schedule table did not populate for already-selected date.")
                 return None
             log.info("Selecting date: %s", target)
             # Wait for the schedule API response before returning so the table is fresh.

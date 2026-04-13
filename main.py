@@ -28,7 +28,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def configure_logging() -> None:
     # Set up INFO-level logging with a compact format.
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="[PID=%(process)d] [%(asctime)s] [%(levelname)s] %(message)s",
+                        datefmt="%H:%M:%S")
 
 
 def run_alignment_command() -> int:

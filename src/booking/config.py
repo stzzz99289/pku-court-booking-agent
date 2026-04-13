@@ -61,6 +61,9 @@ class AppConfig:
     save_captcha: bool = False  # save captcha images to data/captcha/ for benchmarking
     debug: bool = False  # use manual stdin solver instead of API to save tokens
     headless: bool = False  # run Chromium headless; on finish, auto-close the browser and exit
+    scheduled_mode: bool = False
+    scheduled_time: str = "120000"        # HHMMSS 24-h format
+    scheduled_window_minutes: int = 3     # must start within this many minutes before scheduled_time
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
     selectors: SelectorConfig = field(default_factory=SelectorConfig)
@@ -114,6 +117,9 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         save_captcha=bool(raw.get("save_captcha", False)),
         debug=bool(raw.get("debug", False)),
         headless=bool(raw.get("headless", False)),
+        scheduled_mode=bool(raw.get("scheduled_mode", False)),
+        scheduled_time=str(raw.get("scheduled_time", "120000")),
+        scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         browser=_parse_browser(raw),
         captcha=_parse_captcha(raw),
         selectors=_parse_selectors(raw),

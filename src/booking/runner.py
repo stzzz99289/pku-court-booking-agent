@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,7 +14,7 @@ from .booking_flow import (
     solve_booking_captcha,
 )
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
-from .captcha import ManualCaptchaSolver, save_captcha_image
+from .captcha import ManualCaptchaSolver
 from .config import AppConfig, load_config
 from .login import ensure_logged_in
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
@@ -62,6 +64,54 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     log.info("Landed on: %s", page.url)
 
 
+def _parse_scheduled_time(hhmmss: str) -> datetime:
+    """Parse HHMMSS string into a datetime for today."""
+    h, m, s = int(hhmmss[:2]), int(hhmmss[2:4]), int(hhmmss[4:6])
+    return datetime.now().replace(hour=h, minute=m, second=s, microsecond=0)
+
+
+def _check_schedule_window(cfg: AppConfig) -> BookingResult | None:
+    """Return an error BookingResult if we're outside the allowed window, else None."""
+    target = _parse_scheduled_time(cfg.scheduled_time)
+    window_start = target - timedelta(minutes=cfg.scheduled_window_minutes)
+    now = datetime.now()
+    if now < window_start or now >= target:
+        return BookingResult(
+            False,
+            f"Outside scheduled window. Current time: {now.strftime('%H:%M:%S')}. "
+            f"Allowed window: {window_start.strftime('%H:%M:%S')} – {target.strftime('%H:%M:%S')}. Exiting.",
+        )
+    return None
+
+
+async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
+    """Sleep until scheduled_time, then refresh the page."""
+    target = _parse_scheduled_time(cfg.scheduled_time)
+    remaining = (target - datetime.now()).total_seconds()
+    if remaining > 0:
+        log.info(
+            "Scheduled mode: waiting %.1f s until %s …",
+            remaining, target.strftime("%H:%M:%S"),
+        )
+        await asyncio.sleep(remaining)
+    log.info("Scheduled time reached — refreshing page.")
+    # Wait for both the page DOM and the schedule API response after reload.
+    async with page.expect_response(
+        lambda r: "reservation/day/info" in r.url, timeout=15_000
+    ) as resp_info:
+        await page.reload(wait_until="domcontentloaded")
+    try:
+        await resp_info.value
+        log.info("Schedule data loaded after refresh.")
+    except Exception:
+        log.warning("Did not capture reservation/day/info response after reload; proceeding anyway.")
+    # Wait for Vue app to render the date buttons after reload.
+    try:
+        await page.locator(".date_box > div").first.wait_for(state="visible", timeout=10_000)
+    except Exception:
+        log.warning("Date buttons did not appear within 10 s after reload.")
+
+
 def _print_result(out: BookingResult) -> None:
     # Print the booking result message and any extra details to stdout.
     print(out.message)
@@ -72,6 +122,14 @@ def _print_result(out: BookingResult) -> None:
 async def run(user_config_path: Path, site_config_path: Path) -> BookingResult:
     """Orchestrate the full booking flow: login → navigate → select → submit → captcha → verify."""
     cfg = load_config(user_config_path, site_config_path)
+
+    # Schedule gate: exit immediately if outside the allowed window.
+    if cfg.scheduled_mode:
+        window_err = _check_schedule_window(cfg)
+        if window_err is not None:
+            _print_result(window_err)
+            return window_err
+
     login_solver, click_solver = _make_solvers(cfg)
     context, _ = await launch_persistent_context(cfg)
     page = context.pages[0] if context.pages else await context.new_page()
@@ -85,6 +143,10 @@ async def run(user_config_path: Path, site_config_path: Path) -> BookingResult:
         else:
             await ensure_logged_in(page, cfg, login_solver)
             await _navigate_to_reservation(page, cfg, login_solver)
+
+            # Scheduled mode: wait at the reservation page, then refresh.
+            if cfg.scheduled_mode:
+                await _wait_for_scheduled_time(page, cfg)
 
             # Stage 2: select date.
             date_err = await select_booking_date(page, cfg)
