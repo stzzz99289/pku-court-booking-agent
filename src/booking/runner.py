@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
+import multiprocessing
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,7 +17,7 @@ from .booking_flow import (
 )
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
 from .captcha import ManualCaptchaSolver
-from .config import AppConfig, load_config
+from .config import AppConfig, WorkerConfig, load_config
 from .login import ensure_logged_in
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
 from .result import BookingResult
@@ -119,9 +121,13 @@ def _print_result(out: BookingResult) -> None:
         print(out.details)
 
 
-async def run(user_config_path: Path, site_config_path: Path) -> BookingResult:
+async def run(
+    user_config_path: Path,
+    site_config_path: Path,
+    _config_override: AppConfig | None = None,
+) -> BookingResult:
     """Orchestrate the full booking flow: login → navigate → select → submit → captcha → verify."""
-    cfg = load_config(user_config_path, site_config_path)
+    cfg = _config_override or load_config(user_config_path, site_config_path)
 
     # Schedule gate: exit immediately if outside the allowed window.
     if cfg.scheduled_mode:
@@ -192,3 +198,107 @@ async def run(user_config_path: Path, site_config_path: Path) -> BookingResult:
             _print_result(out)
         await wait_until_user_closes_window(cfg, page)
         await dispose_context(context)
+
+
+# ---------------------------------------------------------------------------
+# Multi-worker support
+# ---------------------------------------------------------------------------
+
+
+def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi: bool) -> AppConfig:
+    """Return a copy of cfg with worker-specific date/time and (for multi) a unique browser profile."""
+    cfg = copy.deepcopy(cfg)
+    cfg.date = worker.date
+    cfg.start_time = worker.start_time
+    cfg.end_time = worker.end_time
+    if multi:
+        cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"worker_{index}")
+    return cfg
+
+
+def _worker_process(
+    index: int,
+    worker: WorkerConfig,
+    user_config_path: Path,
+    site_config_path: Path,
+    result_queue: multiprocessing.Queue,
+) -> None:
+    """Entry point for a worker process — runs the full booking flow."""
+    # Child processes don't inherit the parent's logging config.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[PID=%(process)d] [%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    cfg = load_config(user_config_path, site_config_path)
+    cfg = _apply_worker_config(cfg, worker, index, multi=True)
+    label = f"Worker {index} (date={cfg.date}, {cfg.start_time}:00-{cfg.end_time}:00)"
+    log.info("%s starting.", label)
+    try:
+        result = asyncio.run(run(
+            user_config_path, site_config_path,
+            _config_override=cfg,
+        ))
+    except Exception as e:
+        result = BookingResult(False, f"{label} crashed: {e}")
+    result_queue.put((index, worker, result))
+
+
+def _print_summary(workers: list[WorkerConfig], all_results: list[BookingResult]) -> None:
+    """Print a summary table of all worker results."""
+    print("\n" + "=" * 60)
+    print("BOOKING SUMMARY")
+    print("=" * 60)
+    for i, (w, result) in enumerate(zip(workers, all_results)):
+        status = "SUCCESS" if result.success else "FAILED"
+        print(f"  Worker {i} | date={w.date} {w.start_time}:00-{w.end_time}:00 | {status} | {result.message}")
+    print("=" * 60)
+    succeeded = sum(1 for r in all_results if r.success)
+    print(f"  {succeeded}/{len(all_results)} workers succeeded.")
+    print("=" * 60 + "\n")
+
+
+async def run_all(user_config_path: Path, site_config_path: Path) -> list[BookingResult]:
+    """Run all configured workers. 1 worker = direct run; N workers = separate processes."""
+    cfg = load_config(user_config_path, site_config_path)
+    workers = cfg.workers
+
+    # Single worker: run directly in the current process (no multiprocessing overhead).
+    if len(workers) == 1:
+        single_cfg = _apply_worker_config(cfg, workers[0], 0, multi=False)
+        result = await run(user_config_path, site_config_path, _config_override=single_cfg)
+        return [result]
+
+    # Multiple workers: spawn one process per worker.
+    result_queue: multiprocessing.Queue = multiprocessing.Queue()
+    processes: list[multiprocessing.Process] = []
+    for i, w in enumerate(workers):
+        p = multiprocessing.Process(
+            target=_worker_process,
+            args=(i, w, user_config_path, site_config_path, result_queue),
+            name=f"booking-worker-{i}",
+        )
+        processes.append(p)
+
+    log.info("Launching %d booking workers.", len(processes))
+    for p in processes:
+        p.start()
+    for p in processes:
+        p.join()
+
+    # Collect results (order may differ from launch order).
+    results_by_index: dict[int, tuple[WorkerConfig, BookingResult]] = {}
+    while not result_queue.empty():
+        idx, worker, result = result_queue.get_nowait()
+        results_by_index[idx] = (worker, result)
+
+    all_results: list[BookingResult] = []
+    for i, w in enumerate(workers):
+        if i in results_by_index:
+            _, result = results_by_index[i]
+        else:
+            result = BookingResult(False, f"Worker {i} did not return a result.")
+        all_results.append(result)
+
+    _print_summary(workers, all_results)
+    return all_results

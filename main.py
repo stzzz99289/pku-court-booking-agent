@@ -43,24 +43,24 @@ def run_alignment_command() -> int:
 def import_runner():
     # Import the async runner, printing a helpful message if Playwright is missing.
     try:
-        from src.booking.runner import run
+        from src.booking import runner
     except ModuleNotFoundError as e:
         if "playwright" in str(e).lower():
             print("Playwright is required: pip install -r requirements.txt && playwright install chromium",
                   file=sys.stderr)
         print(e, file=sys.stderr)
         return None
-    return run
+    return runner
 
 
-def run_booking_command(args: argparse.Namespace, run) -> int:
-    # Run the async booking flow and return exit code 0 on success, 1 on failure.
+def run_booking_command(args: argparse.Namespace, runner) -> int:
+    # Run all configured workers (1 = direct, N = multiprocessing). Return 0 if any succeeded.
     try:
-        result = asyncio.run(run(args.user_config, args.site_config))
+        results = asyncio.run(runner.run_all(args.user_config, args.site_config))
     except (FileNotFoundError, ValueError, NotImplementedError, RuntimeError) as e:
         print(e, file=sys.stderr)
         return 1
-    return 0 if result.success else 1
+    return 0 if any(r.success for r in results) else 1
 
 
 def main() -> int:
@@ -69,10 +69,10 @@ def main() -> int:
     if args.print_alignment:
         return run_alignment_command()
     configure_logging()
-    run = import_runner()
-    if run is None:
+    runner = import_runner()
+    if runner is None:
         return 1
-    return run_booking_command(args, run)
+    return run_booking_command(args, runner)
 
 
 if __name__ == "__main__":

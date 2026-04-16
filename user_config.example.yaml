@@ -3,11 +3,6 @@
 account: "your_phone"
 password: "your_password"
 
-# Booking date as YYYYMMDD; hours as two-digit 24h (00–23)
-date: "20250327"
-start_time: "09"
-end_time: "11"
-
 # alumni | iaaa (IAAA not implemented in code yet)
 login_method: "alumni"
 
@@ -24,6 +19,18 @@ captcha:
   username: ""
   api_key: ""   # your chaojiying login password
   softid: ""    # software ID from your chaojiying dashboard
+
+# Booking workers: each entry books a date/time slot independently.
+# With 1 worker the program runs as a single booking flow (no extra processes).
+# With N workers, N browser processes run in parallel.
+# date: YYYYMMDD; start_time/end_time: two-digit 24h hour (e.g. "09", "10")
+workers:
+  - date: "20250327"
+    start_time: "09"
+    end_time: "10"
+  # - date: "20250327"
+  #   start_time: "10"
+  #   end_time: "11"
 
 # Optional: override anything from site_config.yaml, e.g.:
 # browser:

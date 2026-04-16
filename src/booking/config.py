@@ -48,14 +48,19 @@ class SelectorConfig:
 
 
 @dataclass
+class WorkerConfig:
+    """Per-worker overrides for multi-worker booking."""
+    date: str
+    start_time: str
+    end_time: str
+
+
+@dataclass
 class AppConfig:
     base_url: str
     user_data_dir: str
     account: str
     password: str
-    date: str
-    start_time: str
-    end_time: str
     login_method: str = "alumni"
     venue_id: str = ""  # numeric ID from /venue/venue-reservation/<id>
     save_captcha: bool = False  # save captcha images to data/captcha/ for benchmarking
@@ -64,12 +69,17 @@ class AppConfig:
     scheduled_mode: bool = False
     scheduled_time: str = "120000"        # HHMMSS 24-h format
     scheduled_window_minutes: int = 3     # must start within this many minutes before scheduled_time
+    # Populated from workers list; set by runner before the booking flow starts.
+    date: str = ""
+    start_time: str = ""
+    end_time: str = ""
+    workers: list[WorkerConfig] = field(default_factory=list)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
     selectors: SelectorConfig = field(default_factory=SelectorConfig)
 
 
-REQUIRED_TOP_LEVEL = ("base_url", "user_data_dir", "account", "password", "date", "start_time", "end_time")
+REQUIRED_TOP_LEVEL = ("base_url", "user_data_dir", "account", "password")
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -104,14 +114,14 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
     missing = [k for k in REQUIRED_TOP_LEVEL if k not in raw or raw[k] is None]
     if missing:
         raise ValueError(f"Missing config keys after merge: {', '.join(missing)}")
+    workers = _parse_workers(raw)
+    if not workers:
+        raise ValueError("At least one worker must be configured in the 'workers' list.")
     return AppConfig(
         base_url=str(raw["base_url"]),
         user_data_dir=str(raw["user_data_dir"]),
         account=str(raw["account"]),
         password=str(raw["password"]),
-        date=str(raw["date"]),
-        start_time=str(raw["start_time"]),
-        end_time=str(raw["end_time"]),
         login_method=str(raw.get("login_method", "alumni")),
         venue_id=str(raw.get("venue_id", "")),
         save_captcha=bool(raw.get("save_captcha", False)),
@@ -120,10 +130,29 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         scheduled_mode=bool(raw.get("scheduled_mode", False)),
         scheduled_time=str(raw.get("scheduled_time", "120000")),
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
+        workers=workers,
         browser=_parse_browser(raw),
         captcha=_parse_captcha(raw),
         selectors=_parse_selectors(raw),
     )
+
+
+def _parse_workers(data: dict[str, Any]) -> list[WorkerConfig]:
+    # Parse optional workers list from merged config dict.
+    raw_list = data.get("workers") or []
+    workers = []
+    for i, w in enumerate(raw_list):
+        if not isinstance(w, dict):
+            raise ValueError(f"workers[{i}] must be a mapping, got {type(w).__name__}.")
+        for key in ("date", "start_time", "end_time"):
+            if key not in w:
+                raise ValueError(f"workers[{i}] is missing required key '{key}'.")
+        workers.append(WorkerConfig(
+            date=str(w["date"]),
+            start_time=str(w["start_time"]),
+            end_time=str(w["end_time"]),
+        ))
+    return workers
 
 
 def _parse_browser(data: dict[str, Any]) -> BrowserConfig:
