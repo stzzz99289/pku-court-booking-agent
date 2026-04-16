@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Upper bound for "N-days-later" dates. PKU's system typically opens bookings
+# a few days out; anything beyond 2 weeks is almost certainly a typo.
+MAX_DAYS_LATER = 14
+_RELATIVE_DATE_RE = re.compile(r"^(\d+)-days?-later$")
 
 
 @dataclass
@@ -137,6 +144,27 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
     )
 
 
+def _resolve_date(value: str, index: int) -> str:
+    """Return a YYYYMMDD date string. Accepts literal YYYYMMDD or 'N-days-later'."""
+    v = value.strip()
+    if v.isdigit() and len(v) == 8:
+        return v
+    m = _RELATIVE_DATE_RE.match(v)
+    if m is None:
+        raise ValueError(
+            f"workers[{index}].date must be YYYYMMDD or 'N-days-later' "
+            f"(got {value!r})."
+        )
+    n = int(m.group(1))
+    if n < 0 or n > MAX_DAYS_LATER:
+        raise ValueError(
+            f"workers[{index}].date offset must be between 0 and {MAX_DAYS_LATER} days "
+            f"(got {n})."
+        )
+    target = date.today() + timedelta(days=n)
+    return target.strftime("%Y%m%d")
+
+
 def _parse_workers(data: dict[str, Any]) -> list[WorkerConfig]:
     # Parse optional workers list from merged config dict.
     raw_list = data.get("workers") or []
@@ -148,7 +176,7 @@ def _parse_workers(data: dict[str, Any]) -> list[WorkerConfig]:
             if key not in w:
                 raise ValueError(f"workers[{i}] is missing required key '{key}'.")
         workers.append(WorkerConfig(
-            date=str(w["date"]),
+            date=_resolve_date(str(w["date"]), i),
             start_time=str(w["start_time"]),
             end_time=str(w["end_time"]),
         ))

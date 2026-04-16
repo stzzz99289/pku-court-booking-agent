@@ -5,8 +5,8 @@ base_url: "https://epe.pku.edu.cn/venue/home"
 
 # Direct navigation to the court booking page (skips venue list click-through).
 # Set to the numeric ID from the URL: https://epe.pku.edu.cn/venue/venue-reservation/85
-venue_id: 85 # 54 tennis
-# venue_id: 64 
+# venue_id: 85 # 54 tennis
+venue_id: 64 
 user_data_dir: "./.browser_profile"
 
 headless: false  # run Chromium headless; when true, browser auto-closes on finish

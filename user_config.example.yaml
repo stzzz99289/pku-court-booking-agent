@@ -23,9 +23,11 @@ captcha:
 # Booking workers: each entry books a date/time slot independently.
 # With 1 worker the program runs as a single booking flow (no extra processes).
 # With N workers, N browser processes run in parallel.
-# date: YYYYMMDD; start_time/end_time: two-digit 24h hour (e.g. "09", "10")
+# date: either YYYYMMDD (e.g. "20250327") or "N-days-later" (e.g. "3-days-later"
+#       → resolved at launch time to today + N days; 0 ≤ N ≤ 14).
+# start_time/end_time: two-digit 24h hour (e.g. "09", "10")
 workers:
-  - date: "20250327"
+  - date: "3-days-later"
     start_time: "09"
     end_time: "10"
   # - date: "20250327"
