@@ -9,7 +9,7 @@ base_url: "https://epe.pku.edu.cn/venue/home"
 venue_id: 64 
 user_data_dir: "./.browser_profile"
 
-headless: false  # run Chromium headless; when true, browser auto-closes on finish
+headless: true  # run Chromium headless; when true, browser auto-closes on finish
 save_captcha: false  # save captcha images to data/captcha/ for benchmarking
 debug: false  # use manual stdin solver instead of API solvers
 
@@ -36,6 +36,12 @@ selectors:
   login_submit: 'role=button[name="登录"]'
   # Optional explicit marker; if empty, code still treats visible 退出 / 欢迎您 as logged-in (saved session).
   logged_in_indicator: ""
+  # Error modal shown after a rejected login submit (iView confirm dialog).
+  # login_error_indicator is the error-variant icon — its presence signals a login failure
+  # (as opposed to info/warn modals, which reuse the same container class).
+  login_error_indicator: ".ivu-modal-confirm-head-icon-error"
+  login_error_text: ".ivu-modal-confirm-body"
+  login_error_dismiss: ".ivu-modal-confirm-footer button"
 
   agreement_checkbox: "input.ivu-checkbox-input"
   booking_submit: ".submit_order_box .btn"

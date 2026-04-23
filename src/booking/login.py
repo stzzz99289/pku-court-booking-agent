@@ -11,6 +11,8 @@ from .config import AppConfig
 log = logging.getLogger(__name__)
 
 _LOGIN_CAPTCHA_MAX_RETRIES = 3
+_LOGIN_SUBMIT_MAX_ATTEMPTS = 4
+_LOGIN_REDIRECT_TIMEOUT_MS = 6_000
 
 
 def _sel(cfg: AppConfig, name: str) -> str:
@@ -78,47 +80,133 @@ async def ensure_logged_in(page: Page, cfg: AppConfig, solver: CaptchaSolver) ->
         )
 
     if method == "alumni":
-        # Switch to the alumni tab, fill credentials, solve login captcha if present.
-        tab = _sel(cfg, "login_mode_alumni")
-        if tab:
-            await page.locator(tab).first.click()
-        user = _sel(cfg, "username_input")
-        pwd = _sel(cfg, "password_input")
-        if not user or not pwd:
-            raise ValueError("selectors.username_input (phone) and password_input are required for alumni login.")
-        await page.locator(user).first.fill(cfg.account)
-        await page.locator(pwd).first.fill(cfg.password)
-        cap_img = _sel(cfg, "login_captcha_image")
-        cap_in = _sel(cfg, "login_captcha_input")
-        if cap_img and cap_in:
-            refresh = _sel(cfg, "login_captcha_refresh")
-            if refresh:
-                await page.locator(refresh).first.click()
-            # Retry loop: login captcha must be exactly 4 digits; refresh and re-solve otherwise.
-            for attempt in range(_LOGIN_CAPTCHA_MAX_RETRIES):
-                await solve_and_fill(page, cap_img, cap_in, solver,
-                                     save_captcha=cfg.save_captcha, captcha_type="login")
-                answer = await page.locator(cap_in).first.input_value()
-                if re.fullmatch(r"\d{4}", answer):
-                    break
-                log.warning("Login captcha answer %r is not 4 digits (attempt %d/%d), retrying.",
-                            answer, attempt + 1, _LOGIN_CAPTCHA_MAX_RETRIES)
-                if refresh:
-                    await page.locator(refresh).first.click()
-            else:
-                log.warning("Failed to get a valid 4-digit captcha answer after %d attempts; proceeding anyway.",
-                            _LOGIN_CAPTCHA_MAX_RETRIES)
-
-        # Submit and wait for the SPA to redirect away from the login page (JWT is stored on redirect).
-        submit = _sel(cfg, "login_submit")
-        if not submit:
-            raise ValueError("selectors.login_submit is required to finish login.")
-        await page.locator(submit).first.click()
-        try:
-            await page.wait_for_url(lambda url: "/venue/login" not in url, timeout=15_000)
-        except Exception:
-            log.warning("Login redirect did not occur within 15s; proceeding anyway.")
-        await page.wait_for_load_state("domcontentloaded")
+        await _alumni_login(page, cfg, solver)
         return
 
     raise ValueError(f"Unknown login_method: {cfg.login_method!r}; use 'alumni' or 'iaaa'.")
+
+
+async def _alumni_login(page: Page, cfg: AppConfig, solver: CaptchaSolver) -> None:
+    """Alumni (phone + password + captcha) login with retry on captcha-rejection."""
+    tab = _sel(cfg, "login_mode_alumni")
+    if tab:
+        await page.locator(tab).first.click()
+    user_sel = _sel(cfg, "username_input")
+    pwd_sel = _sel(cfg, "password_input")
+    if not user_sel or not pwd_sel:
+        raise ValueError("selectors.username_input (phone) and password_input are required for alumni login.")
+    submit_sel = _sel(cfg, "login_submit")
+    if not submit_sel:
+        raise ValueError("selectors.login_submit is required to finish login.")
+    cap_img = _sel(cfg, "login_captcha_image")
+    cap_in = _sel(cfg, "login_captcha_input")
+    refresh_sel = _sel(cfg, "login_captcha_refresh")
+
+    # Outer retry loop: if the server rejects the submit (we stay on /venue/login),
+    # inspect the error modal. Captcha misses get a fresh captcha + retry; other errors
+    # (e.g. wrong password) raise immediately since retry won't help.
+    last_error: str | None = None
+    for attempt in range(1, _LOGIN_SUBMIT_MAX_ATTEMPTS + 1):
+        await page.locator(user_sel).first.fill(cfg.account)
+        await page.locator(pwd_sel).first.fill(cfg.password)
+        if cap_img and cap_in:
+            await _fill_login_captcha(page, cfg, solver, cap_img, cap_in, refresh_sel)
+        await page.locator(submit_sel).first.click()
+        if await _login_redirected(page):
+            await page.wait_for_load_state("domcontentloaded")
+            return
+
+        error_text = await _read_login_error(page, cfg)
+        last_error = error_text
+        if error_text and "验证码" not in error_text:
+            # Unrecoverable (wrong phone/password/etc). Dismiss and bail.
+            await _dismiss_login_error(page, cfg)
+            raise RuntimeError(f"Login rejected: {error_text}")
+
+        log.warning(
+            "Login submit %d/%d rejected (%s). Refreshing captcha and retrying.",
+            attempt, _LOGIN_SUBMIT_MAX_ATTEMPTS,
+            error_text or "no error modal detected",
+        )
+        await _dismiss_login_error(page, cfg)
+        if attempt < _LOGIN_SUBMIT_MAX_ATTEMPTS:
+            await _refresh_login_captcha(page, cap_img, refresh_sel)
+
+    raise RuntimeError(
+        f"Login did not succeed after {_LOGIN_SUBMIT_MAX_ATTEMPTS} attempts"
+        + (f" (last error: {last_error})" if last_error else "")
+        + "."
+    )
+
+
+async def _fill_login_captcha(
+    page: Page, cfg: AppConfig, solver: CaptchaSolver,
+    cap_img: str, cap_in: str, refresh_sel: str,
+) -> None:
+    """Solve and fill the login captcha. Re-tries if OCR output isn't exactly 4 digits."""
+    for attempt in range(_LOGIN_CAPTCHA_MAX_RETRIES):
+        await solve_and_fill(page, cap_img, cap_in, solver,
+                             save_captcha=cfg.save_captcha, captcha_type="login")
+        answer = await page.locator(cap_in).first.input_value()
+        if re.fullmatch(r"\d{4}", answer):
+            return
+        log.warning("Login captcha answer %r is not 4 digits (attempt %d/%d), retrying.",
+                    answer, attempt + 1, _LOGIN_CAPTCHA_MAX_RETRIES)
+        await _refresh_login_captcha(page, cap_img, refresh_sel)
+    log.warning("Failed to get a valid 4-digit captcha answer after %d attempts; submitting anyway.",
+                _LOGIN_CAPTCHA_MAX_RETRIES)
+
+
+async def _refresh_login_captcha(page: Page, cap_img: str, refresh_sel: str) -> None:
+    """Trigger a new captcha image. Prefers a dedicated refresh button; falls back to clicking the image."""
+    if refresh_sel:
+        await page.locator(refresh_sel).first.click()
+        return
+    if cap_img:
+        try:
+            await page.locator(cap_img).first.click()
+        except Exception:
+            pass
+
+
+async def _login_redirected(page: Page) -> bool:
+    """Return True if the SPA navigated away from /venue/login within the redirect window."""
+    try:
+        await page.wait_for_url(
+            lambda url: "/venue/login" not in url,
+            timeout=_LOGIN_REDIRECT_TIMEOUT_MS,
+        )
+        return True
+    except Exception:
+        return "/venue/login" not in page.url
+
+
+async def _read_login_error(page: Page, cfg: AppConfig) -> str | None:
+    """Return the text of the login error modal if one is visible, else None."""
+    indicator = _sel(cfg, "login_error_indicator")
+    body = _sel(cfg, "login_error_text")
+    if not indicator or not body:
+        return None
+    try:
+        ind_loc = page.locator(indicator).first
+        if not await ind_loc.count() or not await ind_loc.is_visible():
+            return None
+        text = (await page.locator(body).first.inner_text()).strip()
+        return text or None
+    except Exception:
+        return None
+
+
+async def _dismiss_login_error(page: Page, cfg: AppConfig) -> None:
+    """Click the confirm button on the login error modal if it's open."""
+    dismiss = _sel(cfg, "login_error_dismiss")
+    if not dismiss:
+        return
+    try:
+        btn = page.locator(dismiss).first
+        if await btn.count() and await btn.is_visible():
+            await btn.click()
+            # Give the modal time to unmount so subsequent form interactions aren't intercepted.
+            await page.locator(dismiss).first.wait_for(state="hidden", timeout=2_000)
+    except Exception:
+        pass

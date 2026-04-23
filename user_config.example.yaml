@@ -1,10 +1,17 @@
 # Copy to user_config.yaml and fill in. user_config.yaml is gitignored.
 
-account: "your_phone"
-password: "your_password"
-
-# alumni | iaaa (IAAA not implemented in code yet)
-login_method: "alumni"
+# Login identities. Each entry is one account that can be referenced by workers.
+# login_method: alumni | iaaa   (IAAA not implemented in code yet)
+# name: a short unique identifier used in the workers list below.
+users:
+  - name: "alice"
+    login_method: "alumni"
+    account: "your_phone"
+    password: "your_password"
+  # - name: "bob"
+  #   login_method: "alumni"
+  #   account: "13800000000"
+  #   password: "another_password"
 
 # Run Chromium headless. In headless mode you only see status via terminal
 # output; the browser is auto-closed and the program exits when the flow ends.
@@ -23,14 +30,17 @@ captcha:
 # Booking workers: each entry books a date/time slot independently.
 # With 1 worker the program runs as a single booking flow (no extra processes).
 # With N workers, N browser processes run in parallel.
+# user: must match one of the `name` values in the `users` list above.
 # date: either YYYYMMDD (e.g. "20250327") or "N-days-later" (e.g. "3-days-later"
 #       → resolved at launch time to today + N days; 0 ≤ N ≤ 14).
 # start_time/end_time: two-digit 24h hour (e.g. "09", "10")
 workers:
-  - date: "3-days-later"
+  - user: "alice"
+    date: "3-days-later"
     start_time: "09"
     end_time: "10"
-  # - date: "20250327"
+  # - user: "bob"
+  #   date: "20250327"
   #   start_time: "10"
   #   end_time: "11"
 

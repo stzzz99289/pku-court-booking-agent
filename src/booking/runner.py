@@ -17,7 +17,7 @@ from .booking_flow import (
 )
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
 from .captcha import ManualCaptchaSolver
-from .config import AppConfig, WorkerConfig, load_config
+from .config import AppConfig, UserConfig, WorkerConfig, load_config
 from .login import ensure_logged_in
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
 from .result import BookingResult
@@ -205,14 +205,30 @@ async def run(
 # ---------------------------------------------------------------------------
 
 
+def _find_user(cfg: AppConfig, name: str) -> UserConfig:
+    # Look up a user by name in cfg.users; raises if not found (config.py validates this upfront).
+    for u in cfg.users:
+        if u.name == name:
+            return u
+    raise ValueError(f"Worker references unknown user {name!r}.")
+
+
 def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi: bool) -> AppConfig:
-    """Return a copy of cfg with worker-specific date/time and (for multi) a unique browser profile."""
+    """Return a copy of cfg populated with worker-specific date/time + referenced user's credentials.
+
+    Multi-worker mode gets a per-user browser profile subdirectory so each user's session cookies
+    persist independently across runs.
+    """
     cfg = copy.deepcopy(cfg)
+    user = _find_user(cfg, worker.user)
+    cfg.account = user.account
+    cfg.password = user.password
+    cfg.login_method = user.login_method
     cfg.date = worker.date
     cfg.start_time = worker.start_time
     cfg.end_time = worker.end_time
     if multi:
-        cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"worker_{index}")
+        cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"user_{user.name}")
     return cfg
 
 
@@ -232,7 +248,7 @@ def _worker_process(
     )
     cfg = load_config(user_config_path, site_config_path)
     cfg = _apply_worker_config(cfg, worker, index, multi=True)
-    label = f"Worker {index} (date={cfg.date}, {cfg.start_time}:00-{cfg.end_time}:00)"
+    label = f"Worker {index} (user={worker.user}, date={cfg.date}, {cfg.start_time}:00-{cfg.end_time}:00)"
     log.info("%s starting.", label)
     try:
         result = asyncio.run(run(
@@ -251,7 +267,7 @@ def _print_summary(workers: list[WorkerConfig], all_results: list[BookingResult]
     print("=" * 60)
     for i, (w, result) in enumerate(zip(workers, all_results)):
         status = "SUCCESS" if result.success else "FAILED"
-        print(f"  Worker {i} | date={w.date} {w.start_time}:00-{w.end_time}:00 | {status} | {result.message}")
+        print(f"  Worker {i} | user={w.user} date={w.date} {w.start_time}:00-{w.end_time}:00 | {status} | {result.message}")
     print("=" * 60)
     succeeded = sum(1 for r in all_results if r.success)
     print(f"  {succeeded}/{len(all_results)} workers succeeded.")

@@ -41,6 +41,9 @@ class SelectorConfig:
     login_captcha_refresh: str = ""
     login_submit: str = ""
     logged_in_indicator: str = ""
+    login_error_indicator: str = ""
+    login_error_text: str = ""
+    login_error_dismiss: str = ""
 
     # Booking submit flow
     agreement_checkbox: str = ""
@@ -55,8 +58,18 @@ class SelectorConfig:
 
 
 @dataclass
+class UserConfig:
+    """A single login identity: credentials + login method."""
+    name: str
+    login_method: str
+    account: str
+    password: str
+
+
+@dataclass
 class WorkerConfig:
     """Per-worker overrides for multi-worker booking."""
+    user: str  # must match a UserConfig.name
     date: str
     start_time: str
     end_time: str
@@ -66,9 +79,6 @@ class WorkerConfig:
 class AppConfig:
     base_url: str
     user_data_dir: str
-    account: str
-    password: str
-    login_method: str = "alumni"
     venue_id: str = ""  # numeric ID from /venue/venue-reservation/<id>
     save_captcha: bool = False  # save captcha images to data/captcha/ for benchmarking
     debug: bool = False  # use manual stdin solver instead of API to save tokens
@@ -76,17 +86,22 @@ class AppConfig:
     scheduled_mode: bool = False
     scheduled_time: str = "120000"        # HHMMSS 24-h format
     scheduled_window_minutes: int = 3     # must start within this many minutes before scheduled_time
+    # Populated from the worker's referenced user; set by runner before the booking flow starts.
+    account: str = ""
+    password: str = ""
+    login_method: str = "alumni"
     # Populated from workers list; set by runner before the booking flow starts.
     date: str = ""
     start_time: str = ""
     end_time: str = ""
+    users: list[UserConfig] = field(default_factory=list)
     workers: list[WorkerConfig] = field(default_factory=list)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
     selectors: SelectorConfig = field(default_factory=SelectorConfig)
 
 
-REQUIRED_TOP_LEVEL = ("base_url", "user_data_dir", "account", "password")
+REQUIRED_TOP_LEVEL = ("base_url", "user_data_dir")
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -121,15 +136,15 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
     missing = [k for k in REQUIRED_TOP_LEVEL if k not in raw or raw[k] is None]
     if missing:
         raise ValueError(f"Missing config keys after merge: {', '.join(missing)}")
-    workers = _parse_workers(raw)
+    users = _parse_users(raw)
+    if not users:
+        raise ValueError("At least one user must be configured in the 'users' list.")
+    workers = _parse_workers(raw, users)
     if not workers:
         raise ValueError("At least one worker must be configured in the 'workers' list.")
     return AppConfig(
         base_url=str(raw["base_url"]),
         user_data_dir=str(raw["user_data_dir"]),
-        account=str(raw["account"]),
-        password=str(raw["password"]),
-        login_method=str(raw.get("login_method", "alumni")),
         venue_id=str(raw.get("venue_id", "")),
         save_captcha=bool(raw.get("save_captcha", False)),
         debug=bool(raw.get("debug", False)),
@@ -137,6 +152,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         scheduled_mode=bool(raw.get("scheduled_mode", False)),
         scheduled_time=str(raw.get("scheduled_time", "120000")),
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
+        users=users,
         workers=workers,
         browser=_parse_browser(raw),
         captcha=_parse_captcha(raw),
@@ -165,17 +181,49 @@ def _resolve_date(value: str, index: int) -> str:
     return target.strftime("%Y%m%d")
 
 
-def _parse_workers(data: dict[str, Any]) -> list[WorkerConfig]:
-    # Parse optional workers list from merged config dict.
+def _parse_users(data: dict[str, Any]) -> list[UserConfig]:
+    # Parse the users list from merged config dict; enforces unique non-empty names.
+    raw_list = data.get("users") or []
+    users: list[UserConfig] = []
+    seen: set[str] = set()
+    for i, u in enumerate(raw_list):
+        if not isinstance(u, dict):
+            raise ValueError(f"users[{i}] must be a mapping, got {type(u).__name__}.")
+        for key in ("name", "login_method", "account", "password"):
+            if not u.get(key):
+                raise ValueError(f"users[{i}] is missing required key '{key}'.")
+        name = str(u["name"]).strip()
+        if name in seen:
+            raise ValueError(f"users[{i}].name {name!r} is duplicated; user names must be unique.")
+        seen.add(name)
+        users.append(UserConfig(
+            name=name,
+            login_method=str(u["login_method"]).strip(),
+            account=str(u["account"]),
+            password=str(u["password"]),
+        ))
+    return users
+
+
+def _parse_workers(data: dict[str, Any], users: list[UserConfig]) -> list[WorkerConfig]:
+    # Parse workers list; validates that each worker.user matches a known user name.
+    known_names = {u.name for u in users}
     raw_list = data.get("workers") or []
-    workers = []
+    workers: list[WorkerConfig] = []
     for i, w in enumerate(raw_list):
         if not isinstance(w, dict):
             raise ValueError(f"workers[{i}] must be a mapping, got {type(w).__name__}.")
-        for key in ("date", "start_time", "end_time"):
+        for key in ("user", "date", "start_time", "end_time"):
             if key not in w:
                 raise ValueError(f"workers[{i}] is missing required key '{key}'.")
+        user_name = str(w["user"]).strip()
+        if user_name not in known_names:
+            raise ValueError(
+                f"workers[{i}].user {user_name!r} does not match any user in the 'users' list "
+                f"(known: {sorted(known_names)})."
+            )
         workers.append(WorkerConfig(
+            user=user_name,
             date=_resolve_date(str(w["date"]), i),
             start_time=str(w["start_time"]),
             end_time=str(w["end_time"]),
@@ -213,6 +261,9 @@ def _parse_selectors(data: dict[str, Any]) -> SelectorConfig:
         login_captcha_refresh=str(s.get("login_captcha_refresh", "")),
         login_submit=str(s.get("login_submit", "")),
         logged_in_indicator=str(s.get("logged_in_indicator", "")),
+        login_error_indicator=str(s.get("login_error_indicator", "")),
+        login_error_text=str(s.get("login_error_text", "")),
+        login_error_dismiss=str(s.get("login_error_dismiss", "")),
         agreement_checkbox=str(s.get("agreement_checkbox", "")),
         booking_submit=str(s.get("booking_submit", "")),
         booking_captcha_image=str(s.get("booking_captcha_image", "")),
