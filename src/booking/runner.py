@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from .booking_flow import (
     agree_and_submit_booking,
+    check_booking_rejection,
     confirm_payment,
     select_booking_date,
     select_court_time,
@@ -171,8 +172,13 @@ async def run(
                 else:
                     await agree_and_submit_booking(page, cfg)
 
+                    # The server may reject the submit outright (e.g. another user
+                    # grabbed the slot first) — short-circuit before touching captcha/payment.
+                    rejection = await check_booking_rejection(page)
+                    if rejection is not None:
+                        out = rejection
                     # Stage 5: solve click-captcha (if it appeared) then confirm payment.
-                    if await page.locator(".verifybox").first.is_visible():
+                    elif await page.locator(".verifybox").first.is_visible():
                         if cfg.debug or click_solver is None:
                             out = BookingResult(
                                 True,
@@ -184,10 +190,16 @@ async def run(
                             if captcha_err is not None:
                                 out = captcha_err
                             else:
-                                # Stage 6: confirm payment (free → done, paid → manual).
-                                # confirm_payment may switch `page` to a newly opened
-                                # payment tab and close the old reservation tab.
-                                page, out = await confirm_payment(page, cfg)
+                                # The server may still reject after the captcha passes
+                                # (race with another user) — check again before payment.
+                                rejection = await check_booking_rejection(page)
+                                if rejection is not None:
+                                    out = rejection
+                                else:
+                                    # Stage 6: confirm payment (free → done, paid → manual).
+                                    # confirm_payment may switch `page` to a newly opened
+                                    # payment tab and close the old reservation tab.
+                                    page, out = await confirm_payment(page, cfg)
                     else:
                         page, out = await confirm_payment(page, cfg)
 

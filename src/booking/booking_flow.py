@@ -218,6 +218,24 @@ async def _read_system_error_modal(page: Page) -> str:
     return await page.evaluate(_SYSTEM_ERROR_MODAL_JS)
 
 
+async def check_booking_rejection(page: Page) -> BookingResult | None:
+    """Return a failure BookingResult if a '系统提示' rejection modal is visible, else None.
+
+    Used by the runner to short-circuit the flow whenever the server rejects the
+    booking — e.g. '该场地已被其他人预约，请更换场地或时间后再预约！' (another user
+    grabbed the slot first) or '预约失败，您存在未支付的订单！' (unpaid order blocks
+    new reservations). Both share the same iView confirm-modal structure.
+    """
+    error_text = await _read_system_error_modal(page)
+    if not error_text:
+        return None
+    return BookingResult(
+        False,
+        f"Booking rejected by site: {error_text}",
+        {"url": page.url},
+    )
+
+
 def _find_trade_page(context) -> Page | None:
     """Return the first page in `context` whose URL contains 'tradeNo=', or None.
 
