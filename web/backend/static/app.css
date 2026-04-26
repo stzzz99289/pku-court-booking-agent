@@ -182,6 +182,20 @@ table.data th { background: #fafafa; font-weight: 600; color: var(--muted); }
   white-space: pre-wrap;
 }
 
+.subhead { font-size: 14px; margin: 16px 0 6px; color: var(--muted); font-weight: 600; }
+.schedule-meta { max-width: 520px; margin-bottom: 10px; }
+.schedule-meta th { width: 160px; }
+.hour-tag {
+  display: inline-block;
+  background: #eef3ff;
+  border: 1px solid #c8d4f6;
+  padding: 1px 6px;
+  margin-right: 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.result-list { margin: 6px 0 0; padding-left: 20px; font-size: 13px; }
+
 .log-tail {
   background: #1d1d1f;
   color: #e7e7e7;

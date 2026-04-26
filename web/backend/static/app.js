@@ -11,6 +11,7 @@ document.addEventListener("click", (e) => {
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("booking-form");
   if (form) initBookingForm(form);
+  if (document.getElementById("schedule-log")) initScheduleTab();
 });
 
 async function refreshOrders(btn) {
@@ -271,6 +272,83 @@ async function pollBookingJob(jobId, btn, msg) {
 function renderStatusBadge(status) {
   const cls = status === "succeeded" ? "ok" : status === "failed" ? "err" : "run";
   return `<span class="badge ${cls}">${status}</span>`;
+}
+
+// ---------- Scheduled Task tab ----------
+
+const SCHEDULE_POLL_RUNNING_MS = 1000;
+const SCHEDULE_POLL_WAITING_MS = 5000;
+const SCHEDULE_COUNTDOWN_MS = 1000;
+
+let scheduleNextFireEpoch = null;
+
+function initScheduleTab() {
+  pollSchedule();
+  setInterval(updateCountdown, SCHEDULE_COUNTDOWN_MS);
+}
+
+async function pollSchedule() {
+  try {
+    const r = await fetch("/api/schedule/status");
+    const data = await r.json();
+    renderScheduleStatus(data);
+    const next = data.state === "running" ? SCHEDULE_POLL_RUNNING_MS : SCHEDULE_POLL_WAITING_MS;
+    setTimeout(pollSchedule, next);
+  } catch (err) {
+    setTimeout(pollSchedule, SCHEDULE_POLL_WAITING_MS);
+  }
+}
+
+function renderScheduleStatus(data) {
+  const badge = document.getElementById("schedule-status-badge");
+  badge.textContent = data.state;
+  badge.className = "badge " + (data.state === "running" ? "run" : "ok");
+
+  scheduleNextFireEpoch = data.next_fire || null;
+  const nextFireEl = document.getElementById("schedule-next-fire");
+  nextFireEl.textContent = scheduleNextFireEpoch
+    ? new Date(scheduleNextFireEpoch * 1000).toLocaleString()
+    : "(computing…)";
+
+  const log = document.getElementById("schedule-log");
+  const text = (data.logs && data.logs.length) ? data.logs.join("\n") : "(no run yet)";
+  // Preserve scroll position when user has scrolled up to read.
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
+  log.textContent = text;
+  if (atBottom) log.scrollTop = log.scrollHeight;
+
+  renderLastRunSummary(data);
+  updateCountdown();
+}
+
+function renderLastRunSummary(data) {
+  const target = document.getElementById("schedule-last-run-summary");
+  const lr = data.last_run;
+  if (!lr) { target.innerHTML = ""; return; }
+  const finished = lr.finished_at ? new Date(lr.finished_at * 1000).toLocaleString() : "—";
+  const ok = lr.any_success ? "ok" : "err";
+  const head = lr.any_success ? "Last run: at least one worker succeeded"
+                              : "Last run: no worker succeeded";
+  const rows = (lr.results || []).map((r, i) => `
+    <li>worker ${i + 1}: <strong>${r.success ? "OK" : "FAIL"}</strong> — ${escapeHtml(r.message || "")}</li>
+  `).join("");
+  target.innerHTML = `<div class="result-box ${ok}">
+    <strong>${head}</strong>
+    <div class="hint">finished ${escapeHtml(finished)} · duration ${lr.duration_s ?? "?"}s</div>
+    ${rows ? `<ul class="result-list">${rows}</ul>` : ""}
+  </div>`;
+}
+
+function updateCountdown() {
+  const el = document.getElementById("schedule-countdown");
+  if (!el) return;
+  if (!scheduleNextFireEpoch) { el.textContent = "—"; return; }
+  let remaining = Math.floor(scheduleNextFireEpoch - Date.now() / 1000);
+  if (remaining < 0) remaining = 0;
+  const h = Math.floor(remaining / 3600);
+  const m = Math.floor((remaining % 3600) / 60);
+  const s = remaining % 60;
+  el.textContent = `${h}h ${String(m).padStart(2,"0")}m ${String(s).padStart(2,"0")}s`;
 }
 
 function renderBookingResult(job) {

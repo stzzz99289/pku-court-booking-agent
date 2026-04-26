@@ -147,6 +147,7 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
 
 def load_split_config(
     workers_path: Path, accounts_path: Path, site_path: Path,
+    today: date | None = None,
 ) -> AppConfig:
     """Webapp loader: merge (site defaults) ← (accounts) ← (workers) → AppConfig.
 
@@ -172,7 +173,7 @@ def load_split_config(
     users_list = _parse_users(raw)
     if not users_list:
         raise ValueError(f"{accounts_path} must define at least one user.")
-    workers_list = _parse_workers(raw, users_list)
+    workers_list = _parse_workers(raw, users_list, today=today)
     if not workers_list:
         raise ValueError(f"{workers_path} must define at least one worker.")
     return AppConfig(
@@ -227,8 +228,14 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
     )
 
 
-def _resolve_date(value: str, index: int) -> str:
-    """Return a YYYYMMDD date string. Accepts literal YYYYMMDD or 'N-days-later'."""
+def _resolve_date(value: str, index: int, today: date | None = None) -> str:
+    """Return a YYYYMMDD date string. Accepts literal YYYYMMDD or 'N-days-later'.
+
+    `today` controls what 'N-days-later' is relative to. Defaults to the
+    real-world today; the webapp's scheduler passes the fire date instead so
+    relative dates reflect when the booking flow will actually run, not when
+    the YAML was first loaded.
+    """
     v = value.strip()
     if v.isdigit() and len(v) == 8:
         return v
@@ -244,7 +251,7 @@ def _resolve_date(value: str, index: int) -> str:
             f"workers[{index}].date offset must be between 0 and {MAX_DAYS_LATER} days "
             f"(got {n})."
         )
-    target = date.today() + timedelta(days=n)
+    target = (today or date.today()) + timedelta(days=n)
     return target.strftime("%Y%m%d")
 
 
@@ -301,7 +308,9 @@ def _parse_start_time_list(raw: Any, worker_index: int) -> list[str]:
     return out
 
 
-def _parse_workers(data: dict[str, Any], users: list[UserConfig]) -> list[WorkerConfig]:
+def _parse_workers(
+    data: dict[str, Any], users: list[UserConfig], today: date | None = None,
+) -> list[WorkerConfig]:
     # Parse workers list; validates that each worker.user matches a known user name.
     known_names = {u.name for u in users}
     raw_list = data.get("workers") or []
@@ -320,7 +329,7 @@ def _parse_workers(data: dict[str, Any], users: list[UserConfig]) -> list[Worker
             )
         workers.append(WorkerConfig(
             user=user_name,
-            date=_resolve_date(str(w["date"]), i),
+            date=_resolve_date(str(w["date"]), i, today=today),
             start_time_list=_parse_start_time_list(w["start_time_list"], i),
         ))
     return workers

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Scheduled Task{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>Scheduled Task <span id="schedule-status-badge" class="badge muted">…</span></h2>
+  <p class="hint">A single daily task, always on for the lifetime of this webapp process.
+    Edit <code>config/webapp/scheduled/</code> + <code>accounts.yaml</code> and restart to
+    reconfigure. Concurrency rules with the Run Booking tab land in M5.</p>
+
+  <table class="data schedule-meta">
+    <tbody>
+      <tr><th>Submission time</th><td>{{ scheduled_time[0:2] }}:{{ scheduled_time[2:4] }}:{{ scheduled_time[4:6] }}</td></tr>
+      <tr><th>Prep window</th><td>{{ scheduled_prep_seconds }}s before submission</td></tr>
+      <tr><th>Venue</th><td>{% if venue_name %}{{ venue_name }} ({{ venue_id }}){% else %}{{ venue_id or "?" }}{% endif %}</td></tr>
+      <tr><th>Next fire</th><td id="schedule-next-fire">…</td></tr>
+      <tr><th>Countdown</th><td id="schedule-countdown">…</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="subhead">Workers ({{ workers|length }})</h3>
+  {% if workers %}
+  <table class="data">
+    <thead><tr><th>User</th><th>Date</th><th>Slot priority</th></tr></thead>
+    <tbody>
+      {% for w in workers %}
+      <tr><td>{{ w.user }}</td><td>{{ w.date }}</td>
+        <td>{% for h in w.start_time_list %}<code class="hour-tag">{{ h }}:00</code>{% endfor %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="hint">No workers configured.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Run log</h2>
+  <p class="hint">Live tail while running; otherwise the previous run's complete log
+    (loaded from <code>data/scheduled_last_run.log</code>, persists across restarts).</p>
+  <div id="schedule-last-run-summary"></div>
+  <div id="schedule-log" class="log-tail">(no run yet)</div>
+</section>
+{% endblock %}

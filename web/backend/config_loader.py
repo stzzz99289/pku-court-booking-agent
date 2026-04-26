@@ -6,6 +6,7 @@ The webapp uses three files per set: shared `accounts.yaml`, `user_config.<set>.
 from __future__ import annotations
 
 import copy
+from datetime import date
 from pathlib import Path
 
 from src.booking.config import AppConfig, UserConfig, load_split_config
@@ -24,10 +25,15 @@ def paths_for(set_name: str) -> tuple[Path, Path, Path]:
     return workers, ACCOUNTS_PATH, site
 
 
-def load_set(set_name: str) -> AppConfig:
-    """Load and return the AppConfig for a config set."""
+def load_set(set_name: str, today: date | None = None) -> AppConfig:
+    """Load and return the AppConfig for a config set.
+
+    `today` is the reference date for resolving 'N-days-later' worker dates;
+    defaults to the real-world today. The webapp's scheduler passes the fire
+    date so relative dates reflect when the booking flow will actually run.
+    """
     workers, accounts, site = paths_for(set_name)
-    return load_split_config(workers, accounts, site)
+    return load_split_config(workers, accounts, site, today=today)
 
 
 def per_user_config(base: AppConfig, user: UserConfig) -> AppConfig:

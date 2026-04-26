@@ -8,6 +8,7 @@ Bound to 127.0.0.1 only — there is no auth in v1.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import sys
@@ -33,6 +34,7 @@ from src.booking.result import BookingResult  # noqa: E402
 from src.booking.site_constants import VENUES  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
 from web.backend.jobs import Job, get_job_manager  # noqa: E402
+from web.backend.scheduler import get_scheduler  # noqa: E402
 
 # Hours selectable for booking — matches src/booking/config._parse_start_time_list bounds.
 BOOKABLE_HOURS = [f"{h:02d}" for h in range(6, 22)]
@@ -42,7 +44,17 @@ log = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BACKEND_DIR / "templates"))
 
-app = FastAPI(title="PKU Court Booking Control Panel")
+@contextlib.asynccontextmanager
+async def _lifespan(_: FastAPI):
+    scheduler = get_scheduler()
+    await scheduler.start()
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+
+
+app = FastAPI(title="PKU Court Booking Control Panel", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(BACKEND_DIR / "static")), name="static")
 
 # In-memory cache: most recent orders fetched per (set, user). Replaced on
@@ -140,9 +152,34 @@ def _iso_to_yyyymmdd(iso: str) -> str:
 
 @app.get("/schedule", response_class=HTMLResponse)
 async def page_schedule(request: Request) -> HTMLResponse:
+    # Resolve worker dates relative to the next fire date so the user sees
+    # the dates that the actual scheduled run will book — not whatever date
+    # the webapp happened to boot on.
+    next_fire = get_scheduler().next_fire
+    fire_date = (
+        datetime.fromtimestamp(next_fire).date() if next_fire else date.today()
+    )
+    cfg = load_set("scheduled", today=fire_date)
+    workers_summary = [
+        {
+            "user": w.user,
+            "date": w.date,
+            "start_time_list": list(w.start_time_list),
+        }
+        for w in cfg.workers
+    ]
+    venue_id = int(cfg.venue_id) if str(cfg.venue_id).isdigit() else None
+    venue_name = VENUES.get(venue_id) if venue_id is not None else None
     return templates.TemplateResponse(
-        request, "placeholder.html",
-        {"active_tab": "schedule", "title": "Scheduled Task", "milestone": "M4"},
+        request, "schedule.html",
+        {
+            "active_tab": "schedule",
+            "scheduled_time": cfg.scheduled_time,
+            "scheduled_prep_seconds": cfg.scheduled_prep_seconds,
+            "venue_id": venue_id,
+            "venue_name": venue_name,
+            "workers": workers_summary,
+        },
     )
 
 
@@ -252,6 +289,11 @@ async def api_bookings_run(payload: dict[str, Any]) -> JSONResponse:
 
     job = get_job_manager().start(f"booking:{user.name}", _run)
     return JSONResponse({"job_id": job.id})
+
+
+@app.get("/api/schedule/status")
+async def api_schedule_status() -> JSONResponse:
+    return JSONResponse(get_scheduler().status())
 
 
 @app.get("/api/jobs/{job_id}")
