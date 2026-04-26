@@ -47,7 +47,12 @@ def _make_solvers(cfg: AppConfig):
 
 
 async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
-    """Navigate to the venue-reservation page, re-authenticating if a login modal appears."""
+    """Navigate to the venue-reservation page, re-authenticating if a login modal appears.
+
+    On return, the date buttons (`.date_box > div`) are visible — both the
+    initial nav and the retry-after-rejection path rely on this so that
+    `select_booking_date` doesn't see an empty `.date_box` and bail out.
+    """
     url = _reservation_url(cfg)
     log.info("Navigating to venue reservation: %s", url)
     await page.goto(url, wait_until="domcontentloaded")
@@ -58,6 +63,7 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     try:
         await modal.wait_for(state="visible", timeout=1_500)
     except Exception:
+        await _wait_for_date_buttons(page)
         return  # Modal did not appear — already logged in.
     log.info("'Please login' modal detected — dismissing and re-authenticating.")
     await page.get_by_role("button", name="确定").first.click()
@@ -65,6 +71,15 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     log.info("Re-navigating to venue reservation after login.")
     await page.goto(url, wait_until="domcontentloaded")
     log.info("Landed on: %s", page.url)
+    await _wait_for_date_buttons(page)
+
+
+async def _wait_for_date_buttons(page) -> None:
+    """Wait for Vue to render the .date_box buttons (returns immediately if already there)."""
+    try:
+        await page.locator(".date_box > div").first.wait_for(state="visible", timeout=10_000)
+    except Exception:
+        log.warning("Date buttons did not appear within 10 s after navigation.")
 
 
 def _parse_scheduled_time(hhmmss: str) -> datetime:
@@ -109,10 +124,7 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
     except Exception:
         log.warning("Did not capture reservation/day/info response after reload; proceeding anyway.")
     # Wait for Vue app to render the date buttons after reload.
-    try:
-        await page.locator(".date_box > div").first.wait_for(state="visible", timeout=10_000)
-    except Exception:
-        log.warning("Date buttons did not appear within 10 s after reload.")
+    await _wait_for_date_buttons(page)
 
 
 def _print_result(out: BookingResult) -> None:
@@ -133,42 +145,69 @@ def _is_site_rejection(result: BookingResult) -> bool:
     return not result.success and result.message.startswith(_REJECTION_PREFIX)
 
 
-async def _attempt_one_slot(
-    page, cfg: AppConfig, hour: str, click_solver,
-) -> tuple[object, BookingResult | None]:
-    """Try to book the hour `hour` on the already-loaded reservation page.
+# Safety cap on how many times we refresh and re-walk the priority list. The
+# natural exit is "every hour in the list shows no free courts"; this cap only
+# kicks in if other users keep releasing slots faster than we can claim them.
+_MAX_REFRESH_ATTEMPTS = 20
 
-    Sets cfg.start_time/end_time, runs date → court → submit → captcha → payment,
-    and returns (active_page, result). `result` is None only if the caller should
-    treat the flow as still in progress (not used in current code paths).
 
-    Caller is responsible for navigating back to the reservation page before
-    the next invocation when this attempt ends with a site rejection.
+async def _attempt_book_from_priority_list(
+    page, cfg: AppConfig, click_solver,
+) -> tuple[object, BookingResult, str | None]:
+    """Walk start_time_list on the current schedule page and book the first available slot.
+
+    Steps:
+      1. Select the date once.
+      2. Walk start_time_list in order; for each hour, call select_court_time
+         which scrolls + scans `.reserveBlock` classes (DOM only, no network).
+         Stop at the first hour that has a free court — select_court_time
+         clicks it as a side effect.
+      3. Run submit → captcha → payment for the chosen hour.
+
+    Returns (active_page, result, chosen_hour). When `chosen_hour` is None,
+    no hour in the list had a free court — the caller should NOT refresh
+    again because every priority slot is sold out.
     """
-    cfg.start_time = hour
-    cfg.end_time = f"{int(hour) + 1:02d}"
-
     # Stage 2: select date (re-select after a refresh; no-op if already active).
     date_err = await select_booking_date(page, cfg)
     if date_err is not None:
-        return page, date_err
+        return page, date_err, None
 
-    # Stage 3: select court + time slot.
-    time_err = await select_court_time(page, cfg)
-    if time_err is not None:
-        return page, time_err
+    # Stage 3: walk the priority list and click the first hour with a free court.
+    chosen_hour: str | None = None
+    tried: list[str] = []
+    for hour in cfg.start_time_list:
+        cfg.start_time = hour
+        cfg.end_time = f"{int(hour) + 1:02d}"
+        tried.append(hour)
+        time_err = await select_court_time(page, cfg)
+        if time_err is None:
+            chosen_hour = hour
+            break
+        # Hour unavailable (no free courts or column not in schedule); silently
+        # try the next priority. Logging is kept minimal here because this scan
+        # runs on every refresh and would otherwise spam the log.
+        log.debug("Hour %s:00 unavailable on this page (%s).", hour, time_err.message)
+
+    if chosen_hour is None:
+        slots_str = ", ".join(f"{h}:00" for h in tried)
+        return page, BookingResult(
+            False,
+            f"No available courts at any priority slot ({slots_str}); every hour in start_time_list is sold out.",
+            {"url": page.url, "tried_hours": tried},
+        ), None
 
     # Stage 4: agree + submit.
     if not submit_flow_ready(cfg):
         return page, BookingResult(
             True, HINT_AFTER_BOOKING_FORM,
             {"stopped_at": "after_court_selection", "final_url": page.url},
-        )
+        ), chosen_hour
     await agree_and_submit_booking(page, cfg)
 
     rejection = await check_booking_rejection(page)
     if rejection is not None:
-        return page, rejection
+        return page, rejection, chosen_hour
 
     # Stage 5: click-captcha (if it appeared).
     if await page.locator(".verifybox").first.is_visible():
@@ -177,17 +216,17 @@ async def _attempt_one_slot(
                 True,
                 "Click-captcha appeared (请完成安全验证). Debug mode — solve it manually or close the browser.",
                 {"stopped_at": "captcha"},
-            )
+            ), chosen_hour
         captcha_err = await solve_booking_captcha(page, click_solver, cfg)
         if captcha_err is not None:
-            return page, captcha_err
+            return page, captcha_err, chosen_hour
         rejection = await check_booking_rejection(page)
         if rejection is not None:
-            return page, rejection
+            return page, rejection, chosen_hour
 
     # Stage 6: confirm payment (may switch page to a new trade tab).
     page, result = await confirm_payment(page, cfg)
-    return page, result
+    return page, result, chosen_hour
 
 
 async def run(
@@ -223,48 +262,53 @@ async def run(
             if cfg.scheduled_mode:
                 await _wait_for_scheduled_time(page, cfg)
 
-            # Iterate start_time_list in priority order. Skip to the next hour
-            # if the slot isn't free (no courts available) or the server
-            # rejects the booking (another user grabbed it first). Stop on
-            # the first success or a non-retryable error.
-            slots = list(cfg.start_time_list)
-            if not slots:
+            # Refresh-and-rewalk loop: each iteration walks start_time_list
+            # from the top. If the chosen slot is rejected (someone else grabbed
+            # it), refresh the page and re-walk — the FIRST hour may still have
+            # other free courts. Exit when no priority hour has any free court,
+            # on success, on a non-retryable error, or on the safety cap.
+            if not cfg.start_time_list:
                 out = BookingResult(False, "No start hours configured (start_time_list is empty).", {})
             else:
                 last_failure: BookingResult | None = None
-                for idx, hour in enumerate(slots):
-                    if idx > 0:
-                        # Previous attempt ended with a rejection or no-court — reload back
-                        # to the reservation page so the schedule table is fresh.
-                        log.info("Refreshing reservation page to try next slot %s:00.", hour)
+                for refresh_attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
+                    if refresh_attempt > 1:
+                        log.info("Refresh #%d: re-checking start_time_list from the top.",
+                                 refresh_attempt - 1)
                         await _navigate_to_reservation(page, cfg, login_solver)
 
-                    page, result = await _attempt_one_slot(page, cfg, hour, click_solver)
+                    page, result, chosen_hour = await _attempt_book_from_priority_list(
+                        page, cfg, click_solver,
+                    )
 
                     if result.success:
                         out = result
                         break
 
                     last_failure = result
+
+                    # No hour in the list has any free court — every priority slot is
+                    # sold out. Refreshing won't help (the data was just fetched).
+                    if chosen_hour is None:
+                        out = result
+                        break
+
                     if _is_site_rejection(result):
-                        log.info("Slot %s:00 rejected by site (%s). Trying next slot.",
-                                 hour, result.message)
+                        log.info("Slot %s:00 rejected by site (%s). Refreshing to re-walk priority list.",
+                                 chosen_hour, result.message)
                         continue
-                    # Some select_court_time failures are slot-specific (e.g. all courts
-                    # sold at this hour, or the hour isn't in the schedule window) —
-                    # retrying a different hour may succeed.
-                    msg = result.message
-                    if msg.startswith("No available courts") or "not found in the schedule table" in msg:
-                        log.info("Slot %s:00 unavailable (%s). Trying next slot.", hour, msg)
-                        continue
-                    # Anything else (date missing, selector misconfig, etc.) won't be
-                    # fixed by trying another hour — stop.
+
+                    # Hard error inside submit/captcha/payment that's not a site
+                    # rejection (selector misconfig, OCR failure, etc.) — won't be
+                    # fixed by another walk.
                     out = result
                     break
                 else:
-                    # Exhausted all slots without a success or a hard stop.
+                    # Hit the safety cap.
                     out = last_failure or BookingResult(
-                        False, "All slots in start_time_list failed.", {}
+                        False,
+                        f"Hit refresh cap ({_MAX_REFRESH_ATTEMPTS}) without booking; site keeps releasing slots faster than we can claim them.",
+                        {},
                     )
 
         assert out is not None

@@ -72,3 +72,7 @@ Configured via `captcha.provider` in user config. Implementations in `captcha.py
 
 - The code for `main.py` should be easy to read for user to understand what is happening when the program runs.
 - Currently, the code is for local testing (run the python program locally to automatically book a court). However, in the future we are planning to build a service on a website for users to control the court booking behavior and checking booked courts info in the website. So keep that in mind when coding.
+
+## Commit Message Style
+
+- Always use a single-line commit message (subject only, no body paragraphs). Keep it under ~70 chars and start with a `[tag]` prefix matching the existing style: `[feature]`, `[fix]`, `[chore]`, etc. The Co-Authored-By trailer may follow as a separate trailer line.
