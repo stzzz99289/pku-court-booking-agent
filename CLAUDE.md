@@ -72,17 +72,28 @@ reuses the existing booking modules:
 
 ```
 web/
-  DESIGN.md                 ← design doc (milestones M1–M6)
+  DESIGN.md                 ← design doc (milestones M1–M7)
   backend/
     app.py                  ← FastAPI entry — `python -m web.backend.app`
+    auth.py                 ← single-user login (PBKDF2 + signed cookie)
     config_loader.py        ← resolves the test/scheduled split-config sets
     jobs.py                 ← in-process job manager + `get_booking_lock()`
     scheduler.py            ← singleton daily-fire background task
     templates/, static/     ← Jinja2 + vanilla JS, no build step
 ```
 
-Run with `python -m web.backend.app` (binds to `127.0.0.1:8000`, no auth). The
-three tabs are Users & Orders, Run Booking (test), and Scheduled Task.
+Two run modes, both require login:
+
+- `python -m web.backend.app` — **local** mode, binds `127.0.0.1:8000`.
+- `WEBAPP_MODE=remote python -m web.backend.app` — **remote** mode, still
+  binds `127.0.0.1` by default but trusts `X-Forwarded-*` from a reverse
+  proxy and marks the session cookie `Secure` (requires HTTPS in front).
+
+Single trusted user. Credentials live in `config/webapp/auth.yaml`
+(gitignored) or env (`WEBAPP_USER`, `WEBAPP_PASSWORD_HASH`, `WEBAPP_SECRET`).
+Generate a hash with `python -m web.backend.auth hash` and a session secret
+with `python -m web.backend.auth secret`. The three tabs are Users & Orders,
+Run Booking (test), and Scheduled Task.
 
 **Concurrency.** Test runs and scheduled runs both acquire a single
 `asyncio.Lock` from `jobs.get_booking_lock()`, so they cannot overlap on the

@@ -1,0 +1,11 @@
+# Single-user webapp login. Copy to auth.yaml (gitignored) and fill in.
+# Env vars (WEBAPP_USER, WEBAPP_PASSWORD_HASH, WEBAPP_SECRET) override this file.
+#
+# To generate `password_hash`:
+#     python -m web.backend.auth hash
+# To generate a fresh `secret` (used to sign session cookies):
+#     python -m web.backend.auth secret
+
+username: "admin"
+password_hash: "pbkdf2_sha256$200000$REPLACE$REPLACE"
+secret: "REPLACE_WITH_OUTPUT_OF_python_-m_web.backend.auth_secret"

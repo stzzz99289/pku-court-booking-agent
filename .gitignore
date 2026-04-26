@@ -16,6 +16,7 @@ config/cli/user_config.yaml
 config/webapp/accounts.yaml
 config/webapp/test/user_config.yaml
 config/webapp/scheduled/user_config.yaml
+config/webapp/auth.yaml
 .browser_profile/
 
 # IDE / tooling

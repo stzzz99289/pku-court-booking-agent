@@ -1,16 +1,18 @@
 """FastAPI app entry point for the PKU court booking control panel.
 
-Run locally with:
+Run with:
 
-    python -m web.backend.app
+    python -m web.backend.app                 # local mode (127.0.0.1:8000)
+    WEBAPP_MODE=remote python -m web.backend.app   # remote (behind a proxy)
 
-Bound to 127.0.0.1 only — there is no auth in v1.
+Both modes require login; see web/backend/auth.py.
 """
 from __future__ import annotations
 
 import contextlib
 import copy
 import logging
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -18,8 +20,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -32,9 +34,17 @@ from src.booking.config import AppConfig  # noqa: E402
 from src.booking.orders import Order, fetch_user_orders  # noqa: E402
 from src.booking.result import BookingResult  # noqa: E402
 from src.booking.site_constants import VENUES  # noqa: E402
+from web.backend import auth as auth_mod  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
 from web.backend.jobs import Job, get_booking_lock, get_job_manager  # noqa: E402
 from web.backend.scheduler import get_scheduler  # noqa: E402
+
+# Deployment mode: "local" (default, 127.0.0.1) or "remote" (behind a TLS
+# reverse proxy). Mode controls bind defaults + cookie Secure flag; the
+# rest of the app is identical in both.
+WEBAPP_MODE = os.environ.get("WEBAPP_MODE", "local").strip().lower()
+if WEBAPP_MODE not in {"local", "remote"}:
+    raise SystemExit(f"WEBAPP_MODE must be 'local' or 'remote', got {WEBAPP_MODE!r}")
 
 # Hours selectable for booking — matches src/booking/config._parse_start_time_list bounds.
 BOOKABLE_HOURS = [f"{h:02d}" for h in range(6, 22)]
@@ -46,6 +56,7 @@ templates = Jinja2Templates(directory=str(BACKEND_DIR / "templates"))
 
 @contextlib.asynccontextmanager
 async def _lifespan(_: FastAPI):
+    auth_mod.load_auth(secure_cookie=(WEBAPP_MODE == "remote"))
     scheduler = get_scheduler()
     await scheduler.start()
     try:
@@ -56,6 +67,25 @@ async def _lifespan(_: FastAPI):
 
 app = FastAPI(title="PKU Court Booking Control Panel", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(BACKEND_DIR / "static")), name="static")
+
+
+# Auth gate: every route except /login, /logout, /healthz, /static/*.
+# auth_dependency raises _RedirectException for unauthed HTML pages; convert
+# it to an actual RedirectResponse via an exception handler.
+@app.exception_handler(auth_mod._RedirectException)
+async def _redirect_handler(_: Request, exc: auth_mod._RedirectException):
+    return exc.response
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    try:
+        await auth_mod.auth_dependency(request)
+    except auth_mod._RedirectException as exc:
+        return exc.response
+    except HTTPException as exc:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
 
 # In-memory cache: most recent orders fetched per (set, user). Replaced on
 # each successful refresh; cleared on app restart (no DB in v1).
@@ -99,6 +129,54 @@ def _users_payload() -> list[dict[str, Any]]:
             **hint,
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Auth pages
+# ---------------------------------------------------------------------------
+
+
+@app.get("/healthz")
+async def healthz() -> JSONResponse:
+    return JSONResponse({"ok": True})
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/", error: str = "") -> HTMLResponse:
+    if auth_mod.is_authenticated(request):
+        return RedirectResponse(url=next or "/", status_code=303)
+    return templates.TemplateResponse(
+        request, "login.html",
+        {"next": next or "/", "error": error},
+    )
+
+
+@app.post("/login")
+async def login_submit(
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    auth = auth_mod.get_auth()
+    ok = (username == auth.username) and auth_mod.verify_password(password, auth.password_hash)
+    if not ok:
+        # Re-render with error; never echo the submitted password back.
+        return RedirectResponse(
+            url=f"/login?error=invalid&next={next or '/'}",
+            status_code=303,
+        )
+    # Only allow same-origin redirects.
+    target = next if (next or "").startswith("/") else "/"
+    response = RedirectResponse(url=target, status_code=303)
+    auth_mod.issue_session(response, username)
+    return response
+
+
+@app.get("/logout")
+async def logout():
+    response = RedirectResponse(url="/login", status_code=303)
+    auth_mod.clear_session(response)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +409,25 @@ def main() -> None:
         format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    # In remote mode the app still binds to 127.0.0.1 by default; a TLS
+    # reverse proxy (e.g. Caddy) is expected in front of it. Override with
+    # WEBAPP_HOST / WEBAPP_PORT if you really need to bind elsewhere (e.g.
+    # 0.0.0.0 inside a container that is itself the public surface).
+    host = os.environ.get("WEBAPP_HOST", "127.0.0.1")
+    port = int(os.environ.get("WEBAPP_PORT", "8000"))
+    forwarded_allow_ips = os.environ.get(
+        "WEBAPP_FORWARDED_ALLOW_IPS",
+        "127.0.0.1" if WEBAPP_MODE == "remote" else "",
+    )
+    log.info("starting webapp in %s mode on %s:%d", WEBAPP_MODE, host, port)
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        proxy_headers=(WEBAPP_MODE == "remote"),
+        forwarded_allow_ips=forwarded_allow_ips or None,
+    )
 
 
 if __name__ == "__main__":
