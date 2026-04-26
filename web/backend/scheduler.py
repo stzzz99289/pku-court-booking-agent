@@ -29,6 +29,7 @@ from src.booking import runner
 from src.booking.config import AppConfig
 from src.booking.result import BookingResult
 from web.backend.config_loader import load_set, per_user_config
+from web.backend.jobs import get_booking_lock
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ META_FILE = DATA_DIR / "scheduled_last_run.json"
 
 LOG_RING_CAPACITY = 10_000
 RETRY_AFTER_CONFIG_ERROR_S = 60
+NO_TEST_BUFFER_S = 60  # added on top of prep_seconds: no test runs in this lead-up
 
 
 class _FileLogHandler(logging.Handler):
@@ -97,6 +99,7 @@ class Scheduler:
         self.task: asyncio.Task | None = None
         self.state: str = "waiting"            # "waiting" | "running"
         self.next_fire: float | None = None    # epoch seconds; None until first compute
+        self.prep_seconds: int = 0             # cached from last cfg load; for no-test window
         self.current_logs: deque[str] | None = None  # populated while running
         self.last_run: dict[str, Any] | None = self._load_meta_from_disk()
         self._stopped = False
@@ -122,15 +125,39 @@ class Scheduler:
 
     # ---- public API ----
 
+    def no_test_window_start(self) -> float | None:
+        """Epoch seconds at which the no-test window opens before next fire."""
+        if self.next_fire is None:
+            return None
+        return self.next_fire - (self.prep_seconds + NO_TEST_BUFFER_S)
+
+    def in_no_test_window(self, now: float | None = None) -> bool:
+        """True iff a test run should be rejected right now.
+
+        Window: from `prep_seconds + 60s` before fire through end of run.
+        Implemented as: state=="running" OR now is in [window_start, next_fire].
+        """
+        if self.state == "running":
+            return True
+        start = self.no_test_window_start()
+        if start is None or self.next_fire is None:
+            return False
+        t = now if now is not None else time.time()
+        return start <= t <= self.next_fire
+
     def status(self) -> dict[str, Any]:
         if self.state == "running" and self.current_logs is not None:
             logs = list(self.current_logs)
         else:
             logs = self._read_log_file()
+        now = time.time()
         return {
             "state": self.state,
             "next_fire": self.next_fire,
-            "now": time.time(),
+            "prep_seconds": self.prep_seconds,
+            "no_test_window_start": self.no_test_window_start(),
+            "no_test_window_active": self.in_no_test_window(now),
+            "now": now,
             "last_run": self.last_run,
             "logs": logs,
             "log_total": len(logs),
@@ -163,6 +190,7 @@ class Scheduler:
                 continue
 
             self.next_fire = compute_next_fire(cfg)
+            self.prep_seconds = cfg.scheduled_prep_seconds
             self.state = "waiting"
             wait = max(0.0, self.next_fire - time.time())
             fire_str = datetime.fromtimestamp(self.next_fire).strftime("%Y-%m-%d %H:%M:%S")
@@ -181,7 +209,12 @@ class Scheduler:
                 fresh_cfg = cfg
 
             try:
-                await self._fire(fresh_cfg)
+                # Hold booking_lock for the whole scheduled fire so a concurrent
+                # test run (which also acquires it) cannot overlap. The no-test
+                # window in app.py is the user-facing first line of defense;
+                # this lock is the authoritative one.
+                async with get_booking_lock():
+                    await self._fire(fresh_cfg)
             except Exception:
                 log.exception("scheduler: unexpected error during fire.")
 

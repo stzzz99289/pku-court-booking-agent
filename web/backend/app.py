@@ -33,7 +33,7 @@ from src.booking.orders import Order, fetch_user_orders  # noqa: E402
 from src.booking.result import BookingResult  # noqa: E402
 from src.booking.site_constants import VENUES  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
-from web.backend.jobs import Job, get_job_manager  # noqa: E402
+from web.backend.jobs import Job, get_booking_lock, get_job_manager  # noqa: E402
 from web.backend.scheduler import get_scheduler  # noqa: E402
 
 # Hours selectable for booking — matches src/booking/config._parse_start_time_list bounds.
@@ -265,6 +265,19 @@ async def api_bookings_run(payload: dict[str, Any]) -> JSONResponse:
         raise HTTPException(status_code=400, detail=f"invalid date {date_iso!r} (expected YYYY-MM-DD)")
     yyyymmdd = _iso_to_yyyymmdd(date_iso)
 
+    # Concurrency gate: refuse if the scheduled task is running or its
+    # no-test window is open. Frontend greys the button using the same
+    # status, but we re-check here so curl/stale pages can't slip through.
+    scheduler = get_scheduler()
+    lock = get_booking_lock()
+    if scheduler.in_no_test_window() or lock.locked():
+        reason = (
+            "scheduled task is running"
+            if scheduler.state == "running"
+            else "scheduled task is about to fire — test runs are blocked in the prep window"
+        )
+        raise HTTPException(status_code=409, detail=reason)
+
     cfg = per_user_config(base, user)
     cfg.date = yyyymmdd
     cfg.start_time_list = hours
@@ -279,12 +292,19 @@ async def api_bookings_run(payload: dict[str, Any]) -> JSONResponse:
             f"[booking] user={user.name} venue={venue_name} ({venue_id}) "
             f"date={yyyymmdd} slots=[{slot_str}]"
         )
-        # Paths are unused when _config_override is provided.
-        result: BookingResult = await runner.run(
-            user_config_path=Path("/dev/null"),
-            site_config_path=Path("/dev/null"),
-            _config_override=cfg,
-        )
+        # Hold booking_lock for the whole flow so the scheduler can't fire on
+        # top of us. If the scheduler is already holding it, await blocks.
+        async with get_booking_lock():
+            # Re-check the no-test window after acquiring the lock — between
+            # the pre-flight check and now, the scheduler may have advanced.
+            if get_scheduler().in_no_test_window():
+                raise RuntimeError("scheduled task entered its prep window before this test run could start")
+            # Paths are unused when _config_override is provided.
+            result: BookingResult = await runner.run(
+                user_config_path=Path("/dev/null"),
+                site_config_path=Path("/dev/null"),
+                _config_override=cfg,
+            )
         return asdict(result)
 
     job = get_job_manager().start(f"booking:{user.name}", _run)

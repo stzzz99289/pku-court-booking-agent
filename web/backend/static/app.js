@@ -139,6 +139,7 @@ function initBookingForm(form) {
   const prefill = JSON.parse(list.dataset.prefill || "[]");
   prefill.forEach((h) => addHour(h));
   syncChipStates();
+  pollBookingAvailability();
 
   pool.addEventListener("click", (e) => {
     const chip = e.target.closest(".hour-chip");
@@ -212,6 +213,7 @@ async function submitBooking(form) {
   btn.disabled = true;
   btn.textContent = "Starting…";
   msg.textContent = "";
+  bookingRunInFlight = true;
   document.getElementById("run-status").innerHTML = "";
   document.getElementById("run-log").textContent = "[launching]\n";
   document.getElementById("run-result").innerHTML = "";
@@ -233,6 +235,48 @@ async function submitBooking(form) {
     msg.textContent = err.message;
     btn.disabled = false;
     btn.textContent = "Run now";
+    bookingRunInFlight = false;
+  }
+}
+
+// Poll /api/schedule/status so the "Run now" button greys out while the
+// scheduled task is running or in its no-test prep window. Server enforces
+// the same rule (HTTP 409) — this is just a UX hint.
+const BOOKING_AVAIL_POLL_MS = 5000;
+let bookingRunInFlight = false;
+
+async function pollBookingAvailability() {
+  try {
+    const r = await fetch("/api/schedule/status");
+    const data = await r.json();
+    applyBookingAvailability(data);
+  } catch (err) {
+    // ignore; try again next tick
+  }
+  setTimeout(pollBookingAvailability, BOOKING_AVAIL_POLL_MS);
+}
+
+function applyBookingAvailability(data) {
+  const btn = document.getElementById("run-btn");
+  const msg = document.getElementById("run-msg");
+  if (!btn) return;
+  if (bookingRunInFlight) return;  // don't fight the in-flight handler
+  const blocked = !!data.no_test_window_active;
+  btn.disabled = blocked;
+  if (blocked) {
+    if (data.state === "running") {
+      btn.title = "scheduled task is running";
+      msg.textContent = "scheduled task is running — test runs paused";
+    } else {
+      const fire = data.next_fire ? new Date(data.next_fire * 1000).toLocaleTimeString() : "soon";
+      btn.title = `scheduled task fires at ${fire}; test runs blocked in the prep window`;
+      msg.textContent = `test runs paused until after ${fire}`;
+    }
+  } else {
+    btn.title = "";
+    if (msg.textContent.startsWith("test runs paused") || msg.textContent.startsWith("scheduled task")) {
+      msg.textContent = "";
+    }
   }
 }
 
@@ -267,6 +311,7 @@ async function pollBookingJob(jobId, btn, msg) {
   btn.disabled = false;
   btn.textContent = "Run now";
   msg.textContent = "";
+  bookingRunInFlight = false;
 }
 
 function renderStatusBadge(status) {

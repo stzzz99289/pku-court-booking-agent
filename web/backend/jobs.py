@@ -128,3 +128,19 @@ def get_job_manager() -> JobManager:
     if _manager is None:
         _manager = JobManager()
     return _manager
+
+
+_booking_lock: asyncio.Lock | None = None
+
+
+def get_booking_lock() -> asyncio.Lock:
+    """Process-wide lock held for the duration of any booking flow.
+
+    Lazy-built: asyncio.Lock binds to the running event loop on first use.
+    Both the Tab 2 test run and the scheduled run acquire it, so they can
+    never overlap and fight for the shared per-user browser profile.
+    """
+    global _booking_lock
+    if _booking_lock is None:
+        _booking_lock = asyncio.Lock()
+    return _booking_lock
