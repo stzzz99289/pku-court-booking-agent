@@ -23,6 +23,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="path to site config (URLs, selectors, defaults)")
     parser.add_argument("--print-alignment", action="store_true",
                         help="print DevTools MCP + selector checklist and exit")
+    parser.add_argument("--query-orders", type=int, nargs="?", const=10, default=None, metavar="N",
+                        help="for each configured user, log in and print their N most recent paid bookings (default 10), then exit")
     return parser
 
 
@@ -53,6 +55,16 @@ def import_runner():
     return runner
 
 
+def run_query_orders_command(args: argparse.Namespace, runner) -> int:
+    # Fetch and print each user's most recent paid bookings, then exit.
+    try:
+        asyncio.run(runner.query_all_orders(args.user_config, args.site_config, args.query_orders))
+    except (FileNotFoundError, ValueError, NotImplementedError, RuntimeError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    return 0
+
+
 def run_booking_command(args: argparse.Namespace, runner) -> int:
     # Run all configured workers (1 = direct, N = multiprocessing). Return 0 if any succeeded.
     try:
@@ -72,6 +84,8 @@ def main() -> int:
     runner = import_runner()
     if runner is None:
         return 1
+    if args.query_orders is not None:
+        return run_query_orders_command(args, runner)
     return run_booking_command(args, runner)
 
 

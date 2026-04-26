@@ -20,6 +20,7 @@ from .browser import dispose_context, launch_persistent_context, wait_until_user
 from .captcha import ManualCaptchaSolver
 from .config import AppConfig, UserConfig, WorkerConfig, load_config
 from .login import ensure_logged_in
+from .orders import Order, fetch_user_orders, format_orders_table
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
 from .result import BookingResult
 
@@ -394,6 +395,36 @@ def _print_summary(workers: list[WorkerConfig], all_results: list[BookingResult]
     succeeded = sum(1 for r in all_results if r.success)
     print(f"  {succeeded}/{len(all_results)} workers succeeded.")
     print("=" * 60 + "\n")
+
+
+async def query_all_orders(
+    user_config_path: Path, site_config_path: Path, limit: int,
+) -> dict[str, list[Order]]:
+    """Login as each configured user sequentially and fetch their N most recent paid orders.
+
+    Sequential (not parallel) because each run reuses the persistent browser
+    profile keyed by user.name. Returns a {user_name: [Order, ...]} dict and
+    also prints a formatted table per user for terminal use.
+    """
+    cfg = load_config(user_config_path, site_config_path)
+    out: dict[str, list[Order]] = {}
+    for user in cfg.users:
+        user_cfg = copy.deepcopy(cfg)
+        user_cfg.account = user.account
+        user_cfg.password = user.password
+        user_cfg.login_method = user.login_method
+        # Per-user browser profile so saved sessions don't collide.
+        user_cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"user_{user.name}")
+        log.info("Querying orders for user %s …", user.name)
+        try:
+            orders = await fetch_user_orders(user_cfg, user, limit)
+        except Exception as e:
+            log.error("Failed to fetch orders for %s: %s", user.name, e)
+            orders = []
+        out[user.name] = orders
+        print(f"\n=== {user.name}: {len(orders)} paid order(s) ===")
+        print(format_orders_table(orders))
+    return out
 
 
 async def run_all(user_config_path: Path, site_config_path: Path) -> list[BookingResult]:
