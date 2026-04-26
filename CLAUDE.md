@@ -26,7 +26,7 @@ python main.py --print-alignment  # Print DevTools MCP selector discovery checkl
 Two-file config with deep merge (user values win over site defaults):
 
 - **`site_config.yaml`** — Base URL, Playwright CSS/role/text selectors, browser settings, defaults
-- **`user_config.yaml`** — Credentials (`account`, `password`), booking params (`date`, `start_time`, `end_time`, `login_method`), CAPTCHA config
+- **`user_config.yaml`** — Credentials (via `users` list) and booking params (via `workers` list: `user`, `date`, `start_time_list`), CAPTCHA config
 
 `src/booking/config.py` merges them into an `AppConfig` dataclass. Required top-level keys are validated at load time. Selectors live in `SelectorConfig` (~25 fields); adding/changing a selector only requires editing `site_config.yaml`.
 

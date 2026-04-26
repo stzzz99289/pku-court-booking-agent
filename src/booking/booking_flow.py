@@ -115,22 +115,18 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     except Exception:
         log.warning("Schedule table header cells did not appear within 10 s.")
 
-    # Scan visible columns, scrolling right until the target time slot is found.
-    header_cells = sched_table.locator("thead td")
-    col_idx: int | None = None
-    for scroll_attempt in range(20):  # 16 one-hour slots between 06:00-22:00
-        # Batch-fetch all header cell texts in one round trip (vs. one per cell).
-        texts = [t.strip() for t in await header_cells.all_inner_texts()]
-        log.debug("Scroll attempt %d: header cells: %s", scroll_attempt, texts)
-        if target_time in texts:
-            col_idx = texts.index(target_time)
-            break
-        arrow = page.locator("div.arrowWrap i.ivu-icon-ios-arrow-forward").first
-        if not await arrow.count():
-            break
-        await arrow.click()
-        await asyncio.sleep(0.4)
+    # After a date switch, Vue tears the tbody down (rows → 1 placeholder) and
+    # re-renders about 300 ms later. Headers keep stale values during the gap,
+    # so wait for the tbody to repopulate before scanning for a slot.
+    try:
+        await page.locator(".spaceTable table tbody tr").nth(1).wait_for(
+            state="visible", timeout=5_000
+        )
+    except Exception:
+        log.warning("Schedule body did not repopulate within 5 s after date switch.")
 
+    header_cells = sched_table.locator("thead td")
+    col_idx = await _scroll_to_target_column(page, header_cells, start, target_time)
     if col_idx is None:
         return BookingResult(
             False,
@@ -169,6 +165,66 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     )
 
 
+_HEADER_HOUR_RE = re.compile(r"^(\d{2}):00-\d{2}:00$")
+
+
+async def _read_header_texts(header_cells) -> list[str]:
+    """Return the stripped inner text of every schedule-table header cell."""
+    return [t.strip() for t in await header_cells.all_inner_texts()]
+
+
+def _visible_start_hours(texts: list[str]) -> list[int]:
+    """Extract the 'HH' start hours visible in the schedule header row."""
+    hours = []
+    for t in texts:
+        m = _HEADER_HOUR_RE.match(t)
+        if m:
+            hours.append(int(m.group(1)))
+    return hours
+
+
+async def _scroll_to_target_column(
+    page: Page, header_cells, target_hour: int, target_time: str,
+) -> int | None:
+    """Scroll the schedule table directly to the page containing target_hour.
+
+    Chooses direction from the visible header hours (each arrow click pages
+    ~5 hours at a time) so we never overshoot and scroll the opposite way.
+    Returns the matching column index, or None if the target never appeared.
+    Polls for a DOM change after each click (~30 ms typical) instead of using
+    a fixed sleep.
+    """
+    for _ in range(6):  # 16-hour booking window → ≤3 page jumps each direction.
+        texts = await _read_header_texts(header_cells)
+        if target_time in texts:
+            return texts.index(target_time)
+
+        visible = _visible_start_hours(texts)
+        if not visible:
+            # Headers not yet populated — brief wait and retry.
+            await asyncio.sleep(0.05)
+            continue
+
+        if target_hour < min(visible):
+            arrow = page.locator("div.arrowWrap i.ivu-icon-ios-arrow-back").first
+        elif target_hour > max(visible):
+            arrow = page.locator("div.arrowWrap i.ivu-icon-ios-arrow-forward").first
+        else:
+            return None  # in visible range but target_time not listed (hour not offered)
+
+        if not await arrow.count():
+            return None  # reached an edge without finding it
+
+        await arrow.click()
+        # Poll for headers to change (DOM typically settles in ~30 ms).
+        for _ in range(20):  # up to ~200 ms
+            await asyncio.sleep(0.01)
+            new_texts = await _read_header_texts(header_cells)
+            if new_texts != texts:
+                break
+    return None
+
+
 async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
     """Check the agreement checkbox (if unchecked) and click the submit button."""
     agree = _sel(cfg, "agreement_checkbox")
@@ -180,8 +236,19 @@ async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
     submit = _sel(cfg, "booking_submit")
     if submit:
         await page.locator(submit).first.click()
-        # Give the SPA time to render the click-captcha dialog.
-        await asyncio.sleep(1.5)
+        # Poll for whichever outcome state shows up first — captcha dialog,
+        # server rejection modal, or payment tab — rather than a fixed sleep.
+        # Bails out as soon as any signal is seen (typically < 200 ms); caps at
+        # ~2 s if nothing ever appears (caller then handles it).
+        ctx = page.context
+        for _ in range(40):
+            if await page.locator(".verifybox").first.is_visible():
+                return
+            if await _read_system_error_modal(page):
+                return
+            if any("tradeNo=" in p.url for p in ctx.pages):
+                return
+            await asyncio.sleep(0.05)
 
 
 _BOOKING_CAPTCHA_MAX_RETRIES = 3
@@ -283,9 +350,12 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         if not await verifybox.is_visible():
             return None  # Captcha already gone — success.
 
-        # Screenshot the captcha image.
+        # Screenshot the captcha image. The image element appears a beat after
+        # .verifybox becomes visible, so give it a short window to attach.
         img_loc = page.locator(".verify-img-panel img").first
-        if not await img_loc.count():
+        try:
+            await img_loc.wait_for(state="visible", timeout=3_000)
+        except Exception:
             return BookingResult(False, "Booking captcha dialog visible but image element not found.", {})
         png = await img_loc.screenshot()
 
@@ -327,10 +397,10 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             await asyncio.sleep(0.3)
 
         # Poll for success conditions: trade page opened in a (new) tab, rejection
-        # modal, or captcha genuinely dismissed. Give the site time to react — the
-        # payment tab can take a couple of seconds to appear over a slow connection.
-        for _ in range(10):  # ~5 s at 0.5 s intervals.
-            await asyncio.sleep(0.5)
+        # modal, or captcha genuinely dismissed. Tight interval so the payment
+        # tab is claimed the moment it appears — total budget stays ~3 s.
+        for _ in range(30):  # ~3 s at 0.1 s intervals.
+            await asyncio.sleep(0.1)
             if _find_trade_page(ctx) is not None:
                 return None  # Payment page appeared — booking accepted.
             error_text = await _read_system_error_modal(page)
@@ -365,8 +435,9 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
     ctx = page.context
     trade_page: Page | None = None
     # After captcha the SPA either opens a new tab with `?tradeNo=...` or pops
-    # a '系统提示' modal explaining the rejection. Poll for both.
-    for _ in range(50):  # ~15 s at 0.3 s intervals.
+    # a '系统提示' modal explaining the rejection. Poll tightly so the payment
+    # tab is claimed the moment it appears (total budget stays ~10 s).
+    for _ in range(200):  # ~10 s at 0.05 s intervals.
         trade_page = _find_trade_page(ctx)
         if trade_page is not None:
             break
@@ -377,7 +448,7 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
                 f"Booking rejected by site: {error_text}",
                 {"url": page.url},
             )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.05)
     else:
         log.warning("Neither payment URL nor error modal appeared within the timeout.")
 

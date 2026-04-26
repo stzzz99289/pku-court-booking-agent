@@ -68,11 +68,17 @@ class UserConfig:
 
 @dataclass
 class WorkerConfig:
-    """Per-worker overrides for multi-worker booking."""
+    """Per-worker overrides for multi-worker booking.
+
+    start_time_list is an ordered priority list of 2-digit hour strings
+    (e.g. ['09', '10', '20']). Each entry represents a one-hour booking
+    (start_time='09' → 09:00-10:00). The worker tries them in order and
+    stops as soon as one succeeds; any that return 'slot already booked'
+    rejections are skipped to try the next.
+    """
     user: str  # must match a UserConfig.name
     date: str
-    start_time: str
-    end_time: str
+    start_time_list: list[str]
 
 
 @dataclass
@@ -92,6 +98,12 @@ class AppConfig:
     login_method: str = "alumni"
     # Populated from workers list; set by runner before the booking flow starts.
     date: str = ""
+    # Ordered list of 2-digit start hours to try for this worker. The runner
+    # iterates through them, setting `start_time`/`end_time` per attempt, and
+    # stops on the first success.
+    start_time_list: list[str] = field(default_factory=list)
+    # Current slot being attempted — set by the runner before each call into
+    # booking_flow. `end_time` is always `start_time + 1` (one-hour bookings).
     start_time: str = ""
     end_time: str = ""
     users: list[UserConfig] = field(default_factory=list)
@@ -205,6 +217,35 @@ def _parse_users(data: dict[str, Any]) -> list[UserConfig]:
     return users
 
 
+def _parse_start_time_list(raw: Any, worker_index: int) -> list[str]:
+    """Validate and normalize a worker's start_time_list.
+
+    Each entry must be a 2-digit hour string in the booking window. The list
+    must be non-empty; duplicates are allowed (first wins implicitly since
+    once a slot books, the rest are skipped).
+    """
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(
+            f"workers[{worker_index}].start_time_list must be a non-empty list of 2-digit hour strings."
+        )
+    out: list[str] = []
+    for j, entry in enumerate(raw):
+        h = str(entry).strip()
+        if not re.fullmatch(r"\d{2}", h):
+            raise ValueError(
+                f"workers[{worker_index}].start_time_list[{j}] must be a 2-digit hour string "
+                f"(e.g. '09'), got {entry!r}."
+            )
+        hv = int(h)
+        if not (6 <= hv <= 21):
+            raise ValueError(
+                f"workers[{worker_index}].start_time_list[{j}] hour {hv:02d} is out of range; "
+                f"must be 06–21 so that end_time = start_time + 1 stays ≤ 22."
+            )
+        out.append(h)
+    return out
+
+
 def _parse_workers(data: dict[str, Any], users: list[UserConfig]) -> list[WorkerConfig]:
     # Parse workers list; validates that each worker.user matches a known user name.
     known_names = {u.name for u in users}
@@ -213,7 +254,7 @@ def _parse_workers(data: dict[str, Any], users: list[UserConfig]) -> list[Worker
     for i, w in enumerate(raw_list):
         if not isinstance(w, dict):
             raise ValueError(f"workers[{i}] must be a mapping, got {type(w).__name__}.")
-        for key in ("user", "date", "start_time", "end_time"):
+        for key in ("user", "date", "start_time_list"):
             if key not in w:
                 raise ValueError(f"workers[{i}] is missing required key '{key}'.")
         user_name = str(w["user"]).strip()
@@ -225,8 +266,7 @@ def _parse_workers(data: dict[str, Any], users: list[UserConfig]) -> list[Worker
         workers.append(WorkerConfig(
             user=user_name,
             date=_resolve_date(str(w["date"]), i),
-            start_time=str(w["start_time"]),
-            end_time=str(w["end_time"]),
+            start_time_list=_parse_start_time_list(w["start_time_list"], i),
         ))
     return workers
 

@@ -27,22 +27,23 @@ captcha:
   api_key: ""   # your chaojiying login password
   softid: ""    # software ID from your chaojiying dashboard
 
-# Booking workers: each entry books a date/time slot independently.
+# Booking workers: each entry books for one user on one date.
 # With 1 worker the program runs as a single booking flow (no extra processes).
 # With N workers, N browser processes run in parallel.
 # user: must match one of the `name` values in the `users` list above.
 # date: either YYYYMMDD (e.g. "20250327") or "N-days-later" (e.g. "3-days-later"
 #       → resolved at launch time to today + N days; 0 ≤ N ≤ 14).
-# start_time/end_time: two-digit 24h hour (e.g. "09", "10")
+# start_time_list: ordered priority list of 2-digit start hours (06–21). Each
+#   entry is a one-hour booking (e.g. '09' → 09:00–10:00). The worker tries
+#   slots in the order given and stops at the first one that succeeds; if a
+#   slot is already booked by someone else, it refreshes and tries the next.
 workers:
   - user: "alice"
     date: "3-days-later"
-    start_time: "09"
-    end_time: "10"
+    start_time_list: ['09', '10', '11', '20', '21']
   # - user: "bob"
   #   date: "20250327"
-  #   start_time: "10"
-  #   end_time: "11"
+  #   start_time_list: ['10', '11']
 
 # Optional: override anything from site_config.yaml, e.g.:
 # browser:

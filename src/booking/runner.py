@@ -122,6 +122,74 @@ def _print_result(out: BookingResult) -> None:
         print(out.details)
 
 
+# Rejection messages from `check_booking_rejection`, `solve_booking_captcha`,
+# and `confirm_payment` all share this prefix; use it to decide whether a
+# failed BookingResult should trigger a next-slot retry or abort immediately.
+_REJECTION_PREFIX = "Booking rejected by site:"
+
+
+def _is_site_rejection(result: BookingResult) -> bool:
+    """True if `result` is a server-side rejection (slot taken, unpaid order, etc.)."""
+    return not result.success and result.message.startswith(_REJECTION_PREFIX)
+
+
+async def _attempt_one_slot(
+    page, cfg: AppConfig, hour: str, click_solver,
+) -> tuple[object, BookingResult | None]:
+    """Try to book the hour `hour` on the already-loaded reservation page.
+
+    Sets cfg.start_time/end_time, runs date → court → submit → captcha → payment,
+    and returns (active_page, result). `result` is None only if the caller should
+    treat the flow as still in progress (not used in current code paths).
+
+    Caller is responsible for navigating back to the reservation page before
+    the next invocation when this attempt ends with a site rejection.
+    """
+    cfg.start_time = hour
+    cfg.end_time = f"{int(hour) + 1:02d}"
+
+    # Stage 2: select date (re-select after a refresh; no-op if already active).
+    date_err = await select_booking_date(page, cfg)
+    if date_err is not None:
+        return page, date_err
+
+    # Stage 3: select court + time slot.
+    time_err = await select_court_time(page, cfg)
+    if time_err is not None:
+        return page, time_err
+
+    # Stage 4: agree + submit.
+    if not submit_flow_ready(cfg):
+        return page, BookingResult(
+            True, HINT_AFTER_BOOKING_FORM,
+            {"stopped_at": "after_court_selection", "final_url": page.url},
+        )
+    await agree_and_submit_booking(page, cfg)
+
+    rejection = await check_booking_rejection(page)
+    if rejection is not None:
+        return page, rejection
+
+    # Stage 5: click-captcha (if it appeared).
+    if await page.locator(".verifybox").first.is_visible():
+        if cfg.debug or click_solver is None:
+            return page, BookingResult(
+                True,
+                "Click-captcha appeared (请完成安全验证). Debug mode — solve it manually or close the browser.",
+                {"stopped_at": "captcha"},
+            )
+        captcha_err = await solve_booking_captcha(page, click_solver, cfg)
+        if captcha_err is not None:
+            return page, captcha_err
+        rejection = await check_booking_rejection(page)
+        if rejection is not None:
+            return page, rejection
+
+    # Stage 6: confirm payment (may switch page to a new trade tab).
+    page, result = await confirm_payment(page, cfg)
+    return page, result
+
+
 async def run(
     user_config_path: Path,
     site_config_path: Path,
@@ -155,53 +223,49 @@ async def run(
             if cfg.scheduled_mode:
                 await _wait_for_scheduled_time(page, cfg)
 
-            # Stage 2: select date.
-            date_err = await select_booking_date(page, cfg)
-            if date_err is not None:
-                out = date_err
-
-            # Stage 3: select court and time slot.
+            # Iterate start_time_list in priority order. Skip to the next hour
+            # if the slot isn't free (no courts available) or the server
+            # rejects the booking (another user grabbed it first). Stop on
+            # the first success or a non-retryable error.
+            slots = list(cfg.start_time_list)
+            if not slots:
+                out = BookingResult(False, "No start hours configured (start_time_list is empty).", {})
             else:
-                time_err = await select_court_time(page, cfg)
-                if time_err is not None:
-                    out = time_err
+                last_failure: BookingResult | None = None
+                for idx, hour in enumerate(slots):
+                    if idx > 0:
+                        # Previous attempt ended with a rejection or no-court — reload back
+                        # to the reservation page so the schedule table is fresh.
+                        log.info("Refreshing reservation page to try next slot %s:00.", hour)
+                        await _navigate_to_reservation(page, cfg, login_solver)
 
-                # Stage 4: agree and submit (stop with hint if submit selector not configured).
-                elif not submit_flow_ready(cfg):
-                    out = BookingResult(True, HINT_AFTER_BOOKING_FORM, {"stopped_at": "after_court_selection", "final_url": page.url})
+                    page, result = await _attempt_one_slot(page, cfg, hour, click_solver)
+
+                    if result.success:
+                        out = result
+                        break
+
+                    last_failure = result
+                    if _is_site_rejection(result):
+                        log.info("Slot %s:00 rejected by site (%s). Trying next slot.",
+                                 hour, result.message)
+                        continue
+                    # Some select_court_time failures are slot-specific (e.g. all courts
+                    # sold at this hour, or the hour isn't in the schedule window) —
+                    # retrying a different hour may succeed.
+                    msg = result.message
+                    if msg.startswith("No available courts") or "not found in the schedule table" in msg:
+                        log.info("Slot %s:00 unavailable (%s). Trying next slot.", hour, msg)
+                        continue
+                    # Anything else (date missing, selector misconfig, etc.) won't be
+                    # fixed by trying another hour — stop.
+                    out = result
+                    break
                 else:
-                    await agree_and_submit_booking(page, cfg)
-
-                    # The server may reject the submit outright (e.g. another user
-                    # grabbed the slot first) — short-circuit before touching captcha/payment.
-                    rejection = await check_booking_rejection(page)
-                    if rejection is not None:
-                        out = rejection
-                    # Stage 5: solve click-captcha (if it appeared) then confirm payment.
-                    elif await page.locator(".verifybox").first.is_visible():
-                        if cfg.debug or click_solver is None:
-                            out = BookingResult(
-                                True,
-                                "Click-captcha appeared (请完成安全验证). Debug mode — solve it manually or close the browser.",
-                                {"stopped_at": "captcha"},
-                            )
-                        else:
-                            captcha_err = await solve_booking_captcha(page, click_solver, cfg)
-                            if captcha_err is not None:
-                                out = captcha_err
-                            else:
-                                # The server may still reject after the captcha passes
-                                # (race with another user) — check again before payment.
-                                rejection = await check_booking_rejection(page)
-                                if rejection is not None:
-                                    out = rejection
-                                else:
-                                    # Stage 6: confirm payment (free → done, paid → manual).
-                                    # confirm_payment may switch `page` to a newly opened
-                                    # payment tab and close the old reservation tab.
-                                    page, out = await confirm_payment(page, cfg)
-                    else:
-                        page, out = await confirm_payment(page, cfg)
+                    # Exhausted all slots without a success or a hard stop.
+                    out = last_failure or BookingResult(
+                        False, "All slots in start_time_list failed.", {}
+                    )
 
         assert out is not None
         return out
@@ -226,7 +290,7 @@ def _find_user(cfg: AppConfig, name: str) -> UserConfig:
 
 
 def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi: bool) -> AppConfig:
-    """Return a copy of cfg populated with worker-specific date/time + referenced user's credentials.
+    """Return a copy of cfg populated with worker-specific date/slots + referenced user's credentials.
 
     Multi-worker mode gets a per-user browser profile subdirectory so each user's session cookies
     persist independently across runs.
@@ -237,8 +301,8 @@ def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi
     cfg.password = user.password
     cfg.login_method = user.login_method
     cfg.date = worker.date
-    cfg.start_time = worker.start_time
-    cfg.end_time = worker.end_time
+    cfg.start_time_list = list(worker.start_time_list)
+    # cfg.start_time / cfg.end_time are set by the runner before each attempt.
     if multi:
         cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"user_{user.name}")
     return cfg
@@ -260,7 +324,8 @@ def _worker_process(
     )
     cfg = load_config(user_config_path, site_config_path)
     cfg = _apply_worker_config(cfg, worker, index, multi=True)
-    label = f"Worker {index} (user={worker.user}, date={cfg.date}, {cfg.start_time}:00-{cfg.end_time}:00)"
+    slots_str = ",".join(f"{h}:00" for h in cfg.start_time_list)
+    label = f"Worker {index} (user={worker.user}, date={cfg.date}, slots=[{slots_str}])"
     log.info("%s starting.", label)
     try:
         result = asyncio.run(run(
@@ -279,7 +344,8 @@ def _print_summary(workers: list[WorkerConfig], all_results: list[BookingResult]
     print("=" * 60)
     for i, (w, result) in enumerate(zip(workers, all_results)):
         status = "SUCCESS" if result.success else "FAILED"
-        print(f"  Worker {i} | user={w.user} date={w.date} {w.start_time}:00-{w.end_time}:00 | {status} | {result.message}")
+        slots_str = ",".join(f"{h}:00" for h in w.start_time_list)
+        print(f"  Worker {i} | user={w.user} date={w.date} slots=[{slots_str}] | {status} | {result.message}")
     print("=" * 60)
     succeeded = sum(1 for r in all_results if r.success)
     print(f"  {succeeded}/{len(all_results)} workers succeeded.")
