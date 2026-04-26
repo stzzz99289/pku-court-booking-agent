@@ -3,7 +3,6 @@
 # The scheduler fires at fire_time = scheduled_time - scheduled_prep_seconds
 # so that login/navigation finishes before the submission moment.
 
-venue_id: 85
 user_data_dir: "./.browser_profile"
 
 headless: true

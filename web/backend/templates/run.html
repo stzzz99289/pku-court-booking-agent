@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Run Booking{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>Run Booking (test)</h2>
+  <p class="hint">Pre-filled from <code>config/webapp/test/user_config.yaml</code>. Always headless;
+    the flow stops before payment. Concurrency rules with the scheduled task land in M5.</p>
+
+  <form id="booking-form" class="form-grid">
+    <label>User
+      <select name="user" required>
+        {% for name in users %}
+          <option value="{{ name }}" {% if name == prefill.user %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>Venue
+      <select name="venue_id" required>
+        {% for v in venues %}
+          <option value="{{ v.id }}" {% if v.id == prefill.venue_id %}selected{% endif %}>{{ v.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>Date
+      <input type="date" name="date" value="{{ prefill.date_iso }}" required>
+    </label>
+
+    <div class="hours-field">
+      <span class="label-text">Slot priority</span>
+      <p class="hint">Click an hour to add it to the priority list. Click again in the list to remove.
+        Each entry books a one-hour slot (e.g. <code>09</code> → 09:00–10:00). The flow tries them in order
+        and stops on the first success.</p>
+      <div class="hour-pool">
+        {% for h in hours %}
+          <button type="button" class="hour-chip" data-hour="{{ h }}">{{ h }}:00</button>
+        {% endfor %}
+      </div>
+      <div class="priority-list-wrap">
+        <span class="label-text">Priority order</span>
+        <ol id="priority-list" class="priority-list"
+            data-prefill='{{ prefill.start_time_list | tojson }}'></ol>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn" id="run-btn">Run now</button>
+      <span id="run-msg" class="hint"></span>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Live log</h2>
+  <p class="hint">Polls <code>/api/jobs/{id}</code> every 1 s. Tail follows new lines automatically.</p>
+  <div id="run-status" class="run-status"></div>
+  <div id="run-log" class="log-tail">(no run yet)</div>
+  <div id="run-result"></div>
+</section>
+{% endblock %}

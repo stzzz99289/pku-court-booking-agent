@@ -19,6 +19,12 @@ users:
 # wechat/alipay popup has nowhere to render. Use headed mode for those.
 headless: false
 
+# Venue to book. Numeric ID from the URL https://epe.pku.edu.cn/venue/venue-reservation/<id>.
+# See VENUES in src/booking/site_constants.py for known names:
+#   64 → 邱德拔体育馆-B1台球厅
+#   85 → 五四体育中心-室外网球场
+venue_id: 85
+
 # ChaoJiYing (超级鹰) captcha solver — https://www.chaojiying.com
 # Register an account, create a software ID in the dashboard, then fill in below.
 # Falls back to local ddddocr if the API returns an error.

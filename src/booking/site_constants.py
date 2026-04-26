@@ -12,6 +12,24 @@ from __future__ import annotations
 
 BASE_URL = "https://epe.pku.edu.cn/venue/home"
 
+# Known venues, keyed by the numeric ID in
+# https://epe.pku.edu.cn/venue/venue-reservation/<id>. The webapp uses these
+# names in its UI; YAML configs keep the integer ID as the source of truth.
+VENUES: dict[int, str] = {
+    64: "邱德拔体育馆-B1台球厅",
+    85: "五四体育中心-室外网球场",
+}
+
+
+def venue_label(venue_id: int | str) -> str:
+    """Return "<id> — <name>" for known venues, or just the ID for unknown ones."""
+    try:
+        vid = int(venue_id)
+    except (TypeError, ValueError):
+        return str(venue_id)
+    name = VENUES.get(vid)
+    return f"{vid} — {name}" if name else str(vid)
+
 BROWSER: dict[str, object] = {
     # Playwright slow-motion: pause this many ms between automated actions.
     # 0 in production; bump to 100–300 when debugging selectors visually.

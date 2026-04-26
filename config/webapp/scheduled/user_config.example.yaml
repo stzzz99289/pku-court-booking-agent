@@ -3,6 +3,8 @@
 #
 # Only `workers:` here — credentials live in accounts.yaml.
 
+venue_id: 85   # 五四体育中心-室外网球场
+
 workers:
   - user: "alice"
     date: "7-days-later"

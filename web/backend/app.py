@@ -8,10 +8,12 @@ Bound to 127.0.0.1 only — there is no auth in v1.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import sys
 import time
-from datetime import datetime
+from dataclasses import asdict
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +26,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.booking import runner  # noqa: E402
+from src.booking.config import AppConfig  # noqa: E402
 from src.booking.orders import Order, fetch_user_orders  # noqa: E402
+from src.booking.result import BookingResult  # noqa: E402
+from src.booking.site_constants import VENUES  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
 from web.backend.jobs import Job, get_job_manager  # noqa: E402
+
+# Hours selectable for booking — matches src/booking/config._parse_start_time_list bounds.
+BOOKABLE_HOURS = [f"{h:02d}" for h in range(6, 22)]
 
 log = logging.getLogger(__name__)
 
@@ -95,11 +104,38 @@ async def page_users(request: Request) -> HTMLResponse:
 
 @app.get("/run", response_class=HTMLResponse)
 async def page_run(request: Request) -> HTMLResponse:
-    # M3 will implement this; placeholder for now so the nav doesn't 404.
+    cfg = load_set("test")
+    first = cfg.workers[0] if cfg.workers else None
+    prefill_venue = int(cfg.venue_id) if str(cfg.venue_id).isdigit() else next(iter(VENUES))
+    prefill = {
+        "user": first.user if first else (cfg.users[0].name if cfg.users else ""),
+        "date_iso": _yyyymmdd_to_iso(first.date) if first else date.today().isoformat(),
+        "start_time_list": list(first.start_time_list) if first else [],
+        "venue_id": prefill_venue,
+    }
+    venue_options = [{"id": vid, "name": name} for vid, name in VENUES.items()]
+    # If the configured venue isn't in the known mapping, surface it as an
+    # extra option so the dropdown still reflects the YAML.
+    if prefill_venue not in VENUES:
+        venue_options.append({"id": prefill_venue, "name": f"venue {prefill_venue} (unmapped)"})
     return templates.TemplateResponse(
-        request, "placeholder.html",
-        {"active_tab": "run", "title": "Run Booking", "milestone": "M3"},
+        request, "run.html",
+        {
+            "active_tab": "run",
+            "users": [u.name for u in cfg.users],
+            "hours": BOOKABLE_HOURS,
+            "venues": venue_options,
+            "prefill": prefill,
+        },
     )
+
+
+def _yyyymmdd_to_iso(yyyymmdd: str) -> str:
+    return f"{yyyymmdd[0:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+
+
+def _iso_to_yyyymmdd(iso: str) -> str:
+    return iso.replace("-", "")
 
 
 @app.get("/schedule", response_class=HTMLResponse)
@@ -149,6 +185,73 @@ async def api_orders_get(user_name: str) -> JSONResponse:
     if rows is None:
         return JSONResponse({"user": user_name, "cached": False, "orders": []})
     return JSONResponse({"user": user_name, "cached": True, "orders": rows})
+
+
+@app.post("/api/bookings/run")
+async def api_bookings_run(payload: dict[str, Any]) -> JSONResponse:
+    """Launch the test booking flow as a background job.
+
+    Body: {"user": "alice", "date": "2026-05-03", "start_time_list": ["09","10"]}
+    Concurrency rules (booking_lock + no-test window) land in M5.
+    """
+    user_name = str(payload.get("user", "")).strip()
+    date_iso = str(payload.get("date", "")).strip()
+    raw_hours = payload.get("start_time_list") or []
+    raw_venue = payload.get("venue_id")
+    if not user_name or not date_iso or not raw_hours or raw_venue in (None, ""):
+        raise HTTPException(
+            status_code=400,
+            detail="user, venue_id, date, and start_time_list are required",
+        )
+    try:
+        venue_id = int(raw_venue)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"invalid venue_id {raw_venue!r}")
+
+    base = load_set("test")
+    user = next((u for u in base.users if u.name == user_name), None)
+    if user is None:
+        raise HTTPException(status_code=404, detail=f"unknown user {user_name!r}")
+
+    # Validate hours: must be 2-digit strings in 06–21.
+    hours: list[str] = []
+    for h in raw_hours:
+        s = str(h).strip()
+        if s not in BOOKABLE_HOURS:
+            raise HTTPException(status_code=400, detail=f"invalid hour {h!r} (allowed: 06–21)")
+        hours.append(s)
+
+    # Validate date: HTML date input emits YYYY-MM-DD.
+    try:
+        date.fromisoformat(date_iso)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"invalid date {date_iso!r} (expected YYYY-MM-DD)")
+    yyyymmdd = _iso_to_yyyymmdd(date_iso)
+
+    cfg = per_user_config(base, user)
+    cfg.date = yyyymmdd
+    cfg.start_time_list = hours
+    cfg.venue_id = str(venue_id)
+    cfg.headless = True  # webapp is headless-only
+    cfg.scheduled_mode = False
+
+    async def _run(job: Job) -> dict[str, Any]:
+        slot_str = ",".join(f"{h}:00" for h in hours)
+        venue_name = VENUES.get(venue_id, f"venue {venue_id}")
+        job.append_log(
+            f"[booking] user={user.name} venue={venue_name} ({venue_id}) "
+            f"date={yyyymmdd} slots=[{slot_str}]"
+        )
+        # Paths are unused when _config_override is provided.
+        result: BookingResult = await runner.run(
+            user_config_path=Path("/dev/null"),
+            site_config_path=Path("/dev/null"),
+            _config_override=cfg,
+        )
+        return asdict(result)
+
+    job = get_job_manager().start(f"booking:{user.name}", _run)
+    return JSONResponse({"job_id": job.id})
 
 
 @app.get("/api/jobs/{job_id}")

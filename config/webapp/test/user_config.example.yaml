@@ -4,6 +4,10 @@
 # Only `workers:` here — credentials live in accounts.yaml. Each `user:`
 # value MUST match a `name` in accounts.yaml or the webapp errors at startup.
 
+# Default venue for the test runner; the webapp's Run Booking tab can
+# override this per click. See VENUES in src/booking/site_constants.py.
+venue_id: 85   # 五四体育中心-室外网球场
+
 workers:
   - user: "alice"
     date: "3-days-later"

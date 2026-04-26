@@ -1,7 +1,6 @@
 # Site config for the webapp's "Run Booking" tab (one-off test runs).
 # URL, browser tuning, and selectors live in src/booking/site_constants.py.
 
-venue_id: 85
 user_data_dir: "./.browser_profile"
 
 headless: true

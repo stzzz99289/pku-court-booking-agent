@@ -2,10 +2,6 @@
 # URL, browser tuning, and Playwright selectors are site-invariant and live
 # in src/booking/site_constants.py — only user-tunable settings go here.
 
-# Direct navigation to the court booking page (skips venue list click-through).
-# Set to the numeric ID from the URL: https://epe.pku.edu.cn/venue/venue-reservation/85
-venue_id: 85           # 85 = badminton; 54 = tennis; 64 = ...
-
 user_data_dir: "./.browser_profile"
 
 headless: true         # run Chromium headless; when true, browser auto-closes on finish
