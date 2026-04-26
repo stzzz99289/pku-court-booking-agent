@@ -1,0 +1,13 @@
+# Copy to user_config.test.yaml and customize.
+# Used by the webapp's "Run Booking" tab (Tab 2) for one-off test runs.
+#
+# Only `workers:` here — credentials live in accounts.yaml. Each `user:`
+# value MUST match a `name` in accounts.yaml or the webapp errors at startup.
+
+workers:
+  - user: "alice"
+    date: "3-days-later"
+    start_time_list: ['09', '10', '11', '20', '21']
+
+# Optional overrides (anything from site_config.test.yaml).
+# headless: true

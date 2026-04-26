@@ -1,0 +1,19 @@
+# Site config for the CLI (`python main.py`).
+# URL, browser tuning, and Playwright selectors are site-invariant and live
+# in src/booking/site_constants.py — only user-tunable settings go here.
+
+# Direct navigation to the court booking page (skips venue list click-through).
+# Set to the numeric ID from the URL: https://epe.pku.edu.cn/venue/venue-reservation/85
+venue_id: 85           # 85 = badminton; 54 = tennis; 64 = ...
+
+user_data_dir: "./.browser_profile"
+
+headless: true         # run Chromium headless; when true, browser auto-closes on finish
+save_captcha: false    # save captcha images to data/captcha/ for benchmarking
+debug: false           # use manual stdin solver instead of API solvers
+
+# Scheduled booking: wait until a precise time before submitting.
+# Useful for slots that open at a fixed time (e.g. 12:00:00).
+scheduled_mode: false
+scheduled_time: "120000"        # HHMMSS 24-h format
+scheduled_window_minutes: 3     # max minutes early the program may start

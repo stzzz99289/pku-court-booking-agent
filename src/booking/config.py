@@ -6,7 +6,11 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import copy
+
 import yaml
+
+from .site_constants import SITE_DEFAULTS
 
 # Upper bound for "N-days-later" dates. PKU's system typically opens bookings
 # a few days out; anything beyond 2 weeks is almost certainly a typo.
@@ -92,6 +96,7 @@ class AppConfig:
     scheduled_mode: bool = False
     scheduled_time: str = "120000"        # HHMMSS 24-h format
     scheduled_window_minutes: int = 3     # must start within this many minutes before scheduled_time
+    scheduled_prep_seconds: int = 90      # webapp scheduler fires this many seconds before scheduled_time
     # Populated from the worker's referenced user; set by runner before the booking flow starts.
     account: str = ""
     password: str = ""
@@ -140,11 +145,60 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     return raw
 
 
+def load_split_config(
+    workers_path: Path, accounts_path: Path, site_path: Path,
+) -> AppConfig:
+    """Webapp loader: merge (site defaults) ← (accounts) ← (workers) → AppConfig.
+
+    `accounts.yaml` holds the `users:` list (credentials) and optional shared
+    `captcha:` config. `workers_path` (user_config.{test,scheduled}.yaml) holds
+    only `workers:` plus optional overrides like `headless`. The CLI loader
+    `load_config` is left untouched so `python main.py` keeps working.
+    """
+    site = _load_yaml_mapping(site_path)
+    accounts = _load_yaml_mapping(accounts_path)
+    workers = _load_yaml_mapping(workers_path)
+    if "users" in workers:
+        raise ValueError(
+            f"{workers_path} must not contain a 'users:' section — credentials live in {accounts_path}."
+        )
+    raw = _deep_merge(
+        _deep_merge(_deep_merge(copy.deepcopy(SITE_DEFAULTS), site), accounts),
+        workers,
+    )
+    missing = [k for k in REQUIRED_TOP_LEVEL if k not in raw or raw[k] is None]
+    if missing:
+        raise ValueError(f"Missing config keys after merge: {', '.join(missing)}")
+    users_list = _parse_users(raw)
+    if not users_list:
+        raise ValueError(f"{accounts_path} must define at least one user.")
+    workers_list = _parse_workers(raw, users_list)
+    if not workers_list:
+        raise ValueError(f"{workers_path} must define at least one worker.")
+    return AppConfig(
+        base_url=str(raw["base_url"]),
+        user_data_dir=str(raw["user_data_dir"]),
+        venue_id=str(raw.get("venue_id", "")),
+        save_captcha=bool(raw.get("save_captcha", False)),
+        debug=bool(raw.get("debug", False)),
+        headless=bool(raw.get("headless", False)),
+        scheduled_mode=bool(raw.get("scheduled_mode", False)),
+        scheduled_time=str(raw.get("scheduled_time", "120000")),
+        scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
+        scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
+        users=users_list,
+        workers=workers_list,
+        browser=_parse_browser(raw),
+        captcha=_parse_captcha(raw),
+        selectors=_parse_selectors(raw),
+    )
+
+
 def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
     """Deep-merge site_config (defaults) with user_config (secrets/booking); user wins."""
     site = _load_yaml_mapping(site_config_path)
     user = _load_yaml_mapping(user_config_path)
-    raw = _deep_merge(site, user)
+    raw = _deep_merge(_deep_merge(copy.deepcopy(SITE_DEFAULTS), site), user)
     missing = [k for k in REQUIRED_TOP_LEVEL if k not in raw or raw[k] is None]
     if missing:
         raise ValueError(f"Missing config keys after merge: {', '.join(missing)}")
@@ -164,6 +218,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         scheduled_mode=bool(raw.get("scheduled_mode", False)),
         scheduled_time=str(raw.get("scheduled_time", "120000")),
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
+        scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
         users=users,
         workers=workers,
         browser=_parse_browser(raw),

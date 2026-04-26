@@ -17,14 +17,17 @@ if str(ROOT) not in sys.path:
 def build_arg_parser() -> argparse.ArgumentParser:
     # Define CLI flags: --user-config, --site-config, --print-alignment.
     parser = argparse.ArgumentParser(description="PKU court booking agent")
-    parser.add_argument("-c", "--user-config", type=Path, default=ROOT / "user_config.yaml",
+    parser.add_argument("-c", "--user-config", type=Path, default=ROOT / "config/cli/user_config.yaml",
                         help="path to user config (account, password, booking, login_method)")
-    parser.add_argument("--site-config", type=Path, default=ROOT / "site_config.yaml",
+    parser.add_argument("--site-config", type=Path, default=ROOT / "config/cli/site_config.yaml",
                         help="path to site config (URLs, selectors, defaults)")
     parser.add_argument("--print-alignment", action="store_true",
                         help="print DevTools MCP + selector checklist and exit")
     parser.add_argument("--query-orders", type=int, nargs="?", const=10, default=None, metavar="N",
                         help="for each configured user, log in and print their N most recent paid bookings (default 10), then exit")
+    parser.add_argument("--print-split-config", choices=("test", "scheduled"), default=None,
+                        help="load the webapp split-config pair (accounts.yaml + user_config.<set>.yaml + "
+                             "site_config.<set>.yaml), print the resolved AppConfig, and exit")
     return parser
 
 
@@ -75,12 +78,41 @@ def run_booking_command(args: argparse.Namespace, runner) -> int:
     return 0 if any(r.success for r in results) else 1
 
 
+def run_print_split_config_command(set_name: str) -> int:
+    # Load the webapp split-config pair and print a sanity summary.
+    from src.booking.config import load_split_config
+    workers = ROOT / f"config/webapp/{set_name}/user_config.yaml"
+    accounts = ROOT / "config/webapp/accounts.yaml"
+    site = ROOT / f"config/webapp/{set_name}/site_config.yaml"
+    try:
+        cfg = load_split_config(workers, accounts, site)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Failed to load split config '{set_name}': {e}", file=sys.stderr)
+        return 1
+    print(f"Loaded split-config set '{set_name}':")
+    print(f"  workers file:  {workers}")
+    print(f"  accounts file: {accounts}")
+    print(f"  site file:     {site}")
+    print(f"  base_url={cfg.base_url}  venue_id={cfg.venue_id}  headless={cfg.headless}")
+    print(f"  scheduled_mode={cfg.scheduled_mode}  scheduled_time={cfg.scheduled_time}  "
+          f"prep_seconds={cfg.scheduled_prep_seconds}")
+    print(f"  users ({len(cfg.users)}):")
+    for u in cfg.users:
+        print(f"    - {u.name}  login_method={u.login_method}  account={u.account[:3]}***")
+    print(f"  workers ({len(cfg.workers)}):")
+    for w in cfg.workers:
+        print(f"    - user={w.user}  date={w.date}  start_time_list={w.start_time_list}")
+    return 0
+
+
 def main() -> int:
     # Parse args, then dispatch to alignment checklist or booking flow.
     args = build_arg_parser().parse_args()
     if args.print_alignment:
         return run_alignment_command()
     configure_logging()
+    if args.print_split_config is not None:
+        return run_print_split_config_command(args.print_split_config)
     runner = import_runner()
     if runner is None:
         return 1

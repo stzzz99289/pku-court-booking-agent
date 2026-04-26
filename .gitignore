@@ -12,7 +12,10 @@ env/
 # Environment / local secrets
 .env
 config.yaml
-user_config.yaml
+config/cli/user_config.yaml
+config/webapp/accounts.yaml
+config/webapp/test/user_config.yaml
+config/webapp/scheduled/user_config.yaml
 .browser_profile/
 
 # IDE / tooling

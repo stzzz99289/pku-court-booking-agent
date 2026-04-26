@@ -1,0 +1,26 @@
+# Copy to accounts.yaml and fill in. accounts.yaml is gitignored.
+#
+# Single source of truth for login credentials, shared by both the test pair
+# (user_config.test.yaml + site_config.test.yaml) and the scheduled pair
+# (user_config.scheduled.yaml + site_config.scheduled.yaml).
+#
+# Each entry's `name` is the unique identifier referenced by `workers:` lists
+# in the user_config.{test,scheduled}.yaml files.
+#
+# login_method: alumni | iaaa   (IAAA not implemented in code yet)
+
+users:
+  - name: "alice"
+    login_method: "alumni"
+    account: "13800000000"
+    password: "your_password"
+  # - name: "bob"
+  #   login_method: "alumni"
+  #   account: "13900000000"
+  #   password: "another_password"
+
+# ChaoJiYing (超级鹰) captcha solver — shared across both flows.
+captcha:
+  username: ""
+  api_key: ""
+  softid: ""

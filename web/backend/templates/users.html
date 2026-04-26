@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Users &amp; Orders{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>Users</h2>
+  <p class="hint">Loaded from <code>accounts.yaml</code>. Session-valid hint comes from
+    the modification time of <code>.browser_profile/user_&lt;name&gt;/</code>.</p>
+  <table class="data">
+    <thead>
+      <tr><th>Name</th><th>Login method</th><th>Account</th><th>Session</th><th>Last used</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr data-user="{{ u.name }}">
+        <td>{{ u.name }}</td>
+        <td>{{ u.login_method }}</td>
+        <td>{{ u.account_masked }}</td>
+        <td>
+          {% if u.valid_hint %}<span class="badge ok">likely valid</span>
+          {% elif u.exists %}<span class="badge warn">stale</span>
+          {% else %}<span class="badge muted">no profile</span>{% endif %}
+        </td>
+        <td>{{ u.last_used or "—" }}</td>
+        <td>
+          <button class="btn refresh-orders-btn" data-user="{{ u.name }}">Refresh orders</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Orders</h2>
+  <p class="hint">Click "Refresh orders" above to launch a job. Results render below per user.</p>
+  <div id="orders-results"></div>
+</section>
+{% endblock %}

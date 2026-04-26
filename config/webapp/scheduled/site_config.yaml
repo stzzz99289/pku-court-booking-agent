@@ -1,0 +1,17 @@
+# Site config for the webapp's daily scheduled task.
+# URL, browser tuning, and selectors live in src/booking/site_constants.py.
+# The scheduler fires at fire_time = scheduled_time - scheduled_prep_seconds
+# so that login/navigation finishes before the submission moment.
+
+venue_id: 85
+user_data_dir: "./.browser_profile"
+
+headless: true
+save_captcha: false
+debug: false
+
+# Scheduled mode: wait until scheduled_time (the moment courts open) before submitting.
+scheduled_mode: true
+scheduled_time: "120000"           # HHMMSS — exact submission moment
+scheduled_window_minutes: 3        # max minutes early the booking flow itself may start
+scheduled_prep_seconds: 90         # webapp scheduler fires this many seconds before scheduled_time

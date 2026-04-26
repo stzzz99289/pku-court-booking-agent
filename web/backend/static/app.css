@@ -1,0 +1,108 @@
+:root {
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --border: #e3e3e7;
+  --text: #1a1a1a;
+  --muted: #6a6a72;
+  --accent: #2f5fff;
+  --accent-hover: #1f47cc;
+  --ok: #2c8a3a;
+  --warn: #b8860b;
+  --err: #b00020;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.topbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 24px 0;
+}
+.topbar h1 { margin: 0 0 10px; font-size: 18px; font-weight: 600; }
+.tabs { display: flex; gap: 4px; }
+.tab {
+  padding: 8px 16px;
+  text-decoration: none;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  font-weight: 500;
+}
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab:hover { color: var(--text); }
+
+.content { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+.panel h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.hint { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+.hint code { background: var(--bg); padding: 1px 5px; border-radius: 3px; }
+
+.btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 5px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn:hover { background: var(--accent-hover); }
+.btn:disabled { background: #aaa; cursor: not-allowed; }
+
+table.data {
+  border-collapse: collapse;
+  width: 100%;
+}
+table.data th, table.data td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+table.data th { background: #fafafa; font-weight: 600; color: var(--muted); }
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.badge.ok { background: #e3f4e5; color: var(--ok); }
+.badge.warn { background: #faf1d8; color: var(--warn); }
+.badge.muted { background: #ececef; color: var(--muted); }
+.badge.err { background: #fae0e3; color: var(--err); }
+.badge.run { background: #e2eaff; color: var(--accent); }
+
+.user-orders { margin-top: 12px; }
+.user-orders h3 {
+  font-size: 14px;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.log-tail {
+  background: #1d1d1f;
+  color: #e7e7e7;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow-y: auto;
+}

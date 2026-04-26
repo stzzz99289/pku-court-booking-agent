@@ -1,0 +1,9 @@
+# Copy to user_config.scheduled.yaml and customize.
+# Used by the webapp's daily scheduled task (Tab 3).
+#
+# Only `workers:` here — credentials live in accounts.yaml.
+
+workers:
+  - user: "alice"
+    date: "7-days-later"
+    start_time_list: ['20', '21', '19', '18']
