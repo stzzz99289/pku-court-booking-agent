@@ -15,6 +15,7 @@ scheduler simply fires on its own clock.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import json
 import logging
@@ -41,6 +42,33 @@ META_FILE = DATA_DIR / "scheduled_last_run.json"
 LOG_RING_CAPACITY = 10_000
 RETRY_AFTER_CONFIG_ERROR_S = 60
 NO_TEST_BUFFER_S = 60  # added on top of prep_seconds: no test runs in this lead-up
+
+# Per-task worker label, set in `_run_one` and inherited by every asyncio
+# task spawned from inside that worker's coroutine. The filter below uses it
+# to prepend `[worker N]` to every log line emitted from worker code, so
+# concurrently-running workers can be told apart in the interleaved log.
+_worker_label_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "scheduler_worker_label", default=None,
+)
+
+
+class _WorkerLabelFilter(logging.Filter):
+    """Prepend `[worker N (user)] ` to the record message when a label is set.
+
+    Attached to handlers (not loggers) so it sees records propagating up from
+    `src.booking.*` descendants too — logger-level filters only run for the
+    originating logger. Idempotent: marks the record with a sentinel so adding
+    the filter to multiple handlers doesn't double-prefix.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        label = _worker_label_var.get()
+        if label and not getattr(record, "_worker_prefixed", False):
+            # Mutate `msg` (not the formatted message) so `record.args`
+            # printf-style substitution still works downstream.
+            record.msg = f"[{label}] {record.msg}"
+            record._worker_prefixed = True
+        return True
 
 
 class _FileLogHandler(logging.Handler):
@@ -227,6 +255,9 @@ class Scheduler:
         my_log = logging.getLogger(__name__)
         file_h = _FileLogHandler(LOG_FILE)
         ring_h = _RingLogHandler(self.current_logs)
+        label_f = _WorkerLabelFilter()
+        file_h.addFilter(label_f)
+        ring_h.addFilter(label_f)
         for lg in (booking_log, my_log):
             lg.addHandler(file_h)
             lg.addHandler(ring_h)
@@ -289,7 +320,7 @@ class Scheduler:
             log.info("scheduler: no workers configured; skipping.")
             return []
         coros = []
-        for w in cfg.workers:
+        for idx, w in enumerate(cfg.workers):
             user = next((u for u in cfg.users if u.name == w.user), None)
             if user is None:
                 # _parse_workers should have caught this at load_set time, but be defensive.
@@ -303,10 +334,16 @@ class Scheduler:
             # booking flow would submit immediately on the (still-stale) page
             # instead of waiting at the reservation page for scheduled_time.
             wcfg.scheduled_mode = True
-            coros.append(self._run_one(wcfg, w.user))
+            coros.append(self._run_one(wcfg, w.user, idx))
         return await asyncio.gather(*coros)
 
-    async def _run_one(self, cfg: AppConfig, user_name: str) -> BookingResult:
+    async def _run_one(self, cfg: AppConfig, user_name: str, idx: int) -> BookingResult:
+        # Set the per-task label so every log line emitted inside this
+        # worker (including from src.booking nested awaits) gets a
+        # `[worker N (user)]` prefix via _WorkerLabelFilter. Each
+        # asyncio.gather child runs in its own copied context, so the
+        # set() here doesn't leak to siblings.
+        _worker_label_var.set(f"worker {idx} ({user_name})")
         try:
             return await runner.run(
                 user_config_path=Path("/dev/null"),

@@ -64,7 +64,7 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     try:
         await modal.wait_for(state="visible", timeout=1_500)
     except Exception:
-        await _wait_for_date_buttons(page)
+        await _ensure_date_buttons_visible(page)
         return  # Modal did not appear — already logged in.
     log.info("'Please login' modal detected — dismissing and re-authenticating.")
     await page.get_by_role("button", name="确定").first.click()
@@ -72,15 +72,47 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     log.info("Re-navigating to venue reservation after login.")
     await page.goto(url, wait_until="domcontentloaded")
     log.info("Landed on: %s", page.url)
-    await _wait_for_date_buttons(page)
+    await _ensure_date_buttons_visible(page)
 
 
-async def _wait_for_date_buttons(page) -> None:
-    """Wait for Vue to render the .date_box buttons (returns immediately if already there)."""
-    try:
-        await page.locator(".date_box > div").first.wait_for(state="visible", timeout=10_000)
-    except Exception:
-        log.warning("Date buttons did not appear within 10 s after navigation.")
+# Date-buttons retry budget — kept tight so the happy path (Vue renders in
+# well under a second) is unaffected. Reloads between attempts so a stuck
+# Vue/XHR is given a fresh shot.
+_DATE_BUTTONS_ATTEMPTS = 3
+_DATE_BUTTONS_TIMEOUT_MS = 4_000
+
+
+async def _ensure_date_buttons_visible(page) -> bool:
+    """Wait for `.date_box > div` to render, reloading the page on each miss.
+
+    Returns True if the buttons appear within `_DATE_BUTTONS_ATTEMPTS` tries,
+    False otherwise. Callers that depend on a populated date row should treat
+    False as a transient failure worth re-navigating for at the runner level.
+    """
+    for i in range(1, _DATE_BUTTONS_ATTEMPTS + 1):
+        try:
+            await page.locator(".date_box > div").first.wait_for(
+                state="visible", timeout=_DATE_BUTTONS_TIMEOUT_MS,
+            )
+            if i > 1:
+                log.info("Date buttons appeared on attempt %d/%d.", i, _DATE_BUTTONS_ATTEMPTS)
+            return True
+        except Exception:
+            if i < _DATE_BUTTONS_ATTEMPTS:
+                log.warning(
+                    "Date buttons not visible after %.1f s (attempt %d/%d). Reloading and retrying.",
+                    _DATE_BUTTONS_TIMEOUT_MS / 1000, i, _DATE_BUTTONS_ATTEMPTS,
+                )
+                try:
+                    await page.reload(wait_until="domcontentloaded")
+                except Exception as e:
+                    log.warning("Reload during date-button retry raised: %s", e)
+            else:
+                log.error(
+                    "Date buttons never appeared after %d attempts (each %.1f s + reload).",
+                    _DATE_BUTTONS_ATTEMPTS, _DATE_BUTTONS_TIMEOUT_MS / 1000,
+                )
+    return False
 
 
 def _parse_scheduled_time(hhmmss: str) -> datetime:
@@ -124,8 +156,11 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
         log.info("Schedule data loaded after refresh.")
     except Exception:
         log.warning("Did not capture reservation/day/info response after reload; proceeding anyway.")
-    # Wait for Vue app to render the date buttons after reload.
-    await _wait_for_date_buttons(page)
+    # Wait for Vue app to render the date buttons after reload. The
+    # retry-with-reload loop covers the case where the post-fire-time
+    # refresh races with a slow `reservation/day/info` response and the
+    # date row never renders on the first try.
+    await _ensure_date_buttons_visible(page)
 
 
 def _print_result(out: BookingResult) -> None:
@@ -150,6 +185,11 @@ def _is_site_rejection(result: BookingResult) -> bool:
 # natural exit is "every hour in the list shows no free courts"; this cap only
 # kicks in if other users keep releasing slots faster than we can claim them.
 _MAX_REFRESH_ATTEMPTS = 20
+
+# Cap on transient re-navigations (date buttons / schedule table never
+# rendered). Counted independently from `_MAX_REFRESH_ATTEMPTS` so a
+# pathologically slow page still bails out instead of looping forever.
+_MAX_TRANSIENT_RETRIES = 3
 
 
 async def _attempt_book_from_priority_list(
@@ -177,6 +217,7 @@ async def _attempt_book_from_priority_list(
     # Stage 3: walk the priority list and click the first hour with a free court.
     chosen_hour: str | None = None
     tried: list[str] = []
+    transient_hours = 0
     for hour in cfg.start_time_list:
         cfg.start_time = hour
         cfg.end_time = f"{int(hour) + 1:02d}"
@@ -185,13 +226,26 @@ async def _attempt_book_from_priority_list(
         if time_err is None:
             chosen_hour = hour
             break
-        # Hour unavailable (no free courts or column not in schedule); silently
-        # try the next priority. Logging is kept minimal here because this scan
-        # runs on every refresh and would otherwise spam the log.
-        log.debug("Hour %s:00 unavailable on this page (%s).", hour, time_err.message)
+        # Per-hour outcome — kept at info so a 0/N walk is never silent.
+        is_transient = bool(time_err.details.get("transient"))
+        if is_transient:
+            transient_hours += 1
+        log.info("Hour %s:00 not booked (%s%s).",
+                 hour, "transient: " if is_transient else "", time_err.message)
 
     if chosen_hour is None:
         slots_str = ", ".join(f"{h}:00" for h in tried)
+        # If every hour in the priority list failed transiently (e.g.
+        # schedule table never populated), tell the runner to re-navigate
+        # rather than declaring the list exhausted. Otherwise this is a
+        # real "every priority sold out" exit.
+        all_transient = transient_hours == len(tried) and tried
+        if all_transient:
+            return page, BookingResult(
+                False,
+                f"Schedule data did not load for any priority slot ({slots_str}); transient.",
+                {"url": page.url, "tried_hours": tried, "transient": True},
+            ), None
         return page, BookingResult(
             False,
             f"No available courts at any priority slot ({slots_str}); every hour in start_time_list is sold out.",
@@ -272,6 +326,7 @@ async def run(
                 out = BookingResult(False, "No start hours configured (start_time_list is empty).", {})
             else:
                 last_failure: BookingResult | None = None
+                transient_attempts = 0
                 for refresh_attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
                     if refresh_attempt > 1:
                         log.info("Refresh #%d: re-checking start_time_list from the top.",
@@ -287,6 +342,19 @@ async def run(
                         break
 
                     last_failure = result
+
+                    # Transient page/data-load failure (no date buttons, schedule
+                    # table never populated, etc.). Re-navigate and try again so
+                    # we don't silently report "no slots" when the data wasn't
+                    # actually loaded.
+                    if result.details.get("transient") and transient_attempts < _MAX_TRANSIENT_RETRIES:
+                        transient_attempts += 1
+                        log.warning(
+                            "Transient failure (%s). Re-navigating (transient retry %d/%d).",
+                            result.message, transient_attempts, _MAX_TRANSIENT_RETRIES,
+                        )
+                        await _navigate_to_reservation(page, cfg, login_solver)
+                        continue
 
                     # No hour in the list has any free court — every priority slot is
                     # sold out. Refreshing won't help (the data was just fetched).

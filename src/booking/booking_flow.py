@@ -35,7 +35,15 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
     buttons = page.locator(".date_box > div")
     count = await buttons.count()
     if count == 0:
-        return BookingResult(False, "No date buttons found on reservation page (.date_box > div).", {})
+        # Transient: the runner can re-navigate and try again. The
+        # retry-with-reload inside `_ensure_date_buttons_visible` should
+        # normally catch this earlier; reaching here means even reloads
+        # didn't surface the buttons.
+        return BookingResult(
+            False,
+            "No date buttons found on reservation page (.date_box > div).",
+            {"transient": True},
+        )
 
     available: list[str] = []
     for i in range(count):
@@ -109,11 +117,18 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     log.info("Looking for time slot: %s", target_time)
 
     # Wait for the schedule table (inside .spaceTable) to populate after date selection.
+    # Both header + body must render before we can trust a "no free court"
+    # verdict — otherwise we'd silently scan an empty DOM and report the
+    # priority list as exhausted when the schedule data simply hadn't loaded.
     sched_table = page.locator(".spaceTable table")
     try:
         await sched_table.locator("thead td").nth(1).wait_for(state="visible", timeout=10_000)
     except Exception:
-        log.warning("Schedule table header cells did not appear within 10 s.")
+        return BookingResult(
+            False,
+            f"Schedule table header for {target_time} never rendered (transient — schedule data not loaded).",
+            {"transient": True, "target_time": target_time},
+        )
 
     # After a date switch, Vue tears the tbody down (rows → 1 placeholder) and
     # re-renders about 300 ms later. Headers keep stale values during the gap,
@@ -123,7 +138,11 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
             state="visible", timeout=5_000
         )
     except Exception:
-        log.warning("Schedule body did not repopulate within 5 s after date switch.")
+        return BookingResult(
+            False,
+            f"Schedule table body for {target_time} did not repopulate after date switch (transient).",
+            {"transient": True, "target_time": target_time},
+        )
 
     header_cells = sched_table.locator("thead td")
     col_idx = await _scroll_to_target_column(page, header_cells, start, target_time)
