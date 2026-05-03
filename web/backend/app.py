@@ -54,6 +54,18 @@ log = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BACKEND_DIR / "templates"))
 
+
+def _asset_version(name: str) -> str:
+    """Cache-bust static assets by mtime so browsers pick up edits without a hard refresh."""
+    p = BACKEND_DIR / "static" / name
+    try:
+        return str(int(p.stat().st_mtime))
+    except OSError:
+        return "0"
+
+
+templates.env.globals["asset_version"] = _asset_version
+
 @contextlib.asynccontextmanager
 async def _lifespan(_: FastAPI):
     auth_mod.load_auth(secure_cookie=(WEBAPP_MODE == "remote"))
@@ -86,11 +98,6 @@ async def _auth_middleware(request: Request, call_next):
     except HTTPException as exc:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
-
-# In-memory cache: most recent orders fetched per (set, user). Replaced on
-# each successful refresh; cleared on app restart (no DB in v1).
-_orders_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -271,35 +278,45 @@ async def api_users() -> JSONResponse:
     return JSONResponse({"users": _users_payload()})
 
 
-@app.post("/api/orders/refresh")
-async def api_orders_refresh(payload: dict[str, Any]) -> JSONResponse:
-    """Kick off a background job that logs in as `user` and fetches `limit` orders."""
-    user_name = str(payload.get("user", "")).strip()
+@app.post("/api/orders/refresh_all")
+async def api_orders_refresh_all(payload: dict[str, Any] | None = None) -> JSONResponse:
+    """Kick off one background job that fetches orders for every user, sequentially.
+
+    Returns the combined list sorted by `use_date` descending. Each user's fetch
+    reuses its persistent browser profile, so this is one-by-one (not parallel).
+    """
+    payload = payload or {}
     limit = int(payload.get("limit", 10))
-    if not user_name:
-        raise HTTPException(status_code=400, detail="missing 'user'")
     base = load_set("test")
-    user = next((u for u in base.users if u.name == user_name), None)
-    if user is None:
-        raise HTTPException(status_code=404, detail=f"unknown user {user_name!r}")
-    cfg = per_user_config(base, user)
+    if not base.users:
+        raise HTTPException(status_code=400, detail="no users configured")
 
-    async def _fetch(job: Job) -> dict[str, Any]:
-        orders: list[Order] = await fetch_user_orders(cfg, user, limit)
-        rows = [o.to_dict() for o in orders]
-        _orders_cache[("test", user.name)] = rows
-        return {"user": user.name, "count": len(rows), "orders": rows}
+    async def _fetch_all(job: Job) -> dict[str, Any]:
+        combined: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()  # (user, order_no) — defense in depth
+        for user in base.users:
+            job.append_log(f"[orders] fetching for user={user.name}")
+            cfg = per_user_config(base, user)
+            try:
+                orders: list[Order] = await fetch_user_orders(cfg, user, limit)
+            except Exception as e:
+                job.append_log(f"[orders] {user.name} failed: {type(e).__name__}: {e}")
+                continue
+            added = 0
+            for o in orders:
+                key = (user.name, o.order_no)
+                if not o.order_no or key in seen:
+                    continue
+                seen.add(key)
+                combined.append(o.to_dict())
+                added += 1
+            job.append_log(f"[orders] {user.name}: {added} order(s)")
+        # use_date is an ISO-like string from the site; descending string sort = newest first.
+        combined.sort(key=lambda o: o.get("use_date", ""), reverse=True)
+        return {"count": len(combined), "orders": combined}
 
-    job = get_job_manager().start(f"orders:{user.name}", _fetch)
+    job = get_job_manager().start("orders:all", _fetch_all)
     return JSONResponse({"job_id": job.id})
-
-
-@app.get("/api/orders/{user_name}")
-async def api_orders_get(user_name: str) -> JSONResponse:
-    rows = _orders_cache.get(("test", user_name))
-    if rows is None:
-        return JSONResponse({"user": user_name, "cached": False, "orders": []})
-    return JSONResponse({"user": user_name, "cached": True, "orders": rows})
 
 
 @app.post("/api/bookings/run")

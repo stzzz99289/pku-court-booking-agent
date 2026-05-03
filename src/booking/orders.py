@@ -129,16 +129,36 @@ async def fetch_user_orders(cfg: AppConfig, user: UserConfig, limit: int) -> lis
 
 
 async def _collect_paid_orders(page: Page, user: str, limit: int) -> list[Order]:
-    """Scrape page after page until we have `limit` paid orders or run out."""
+    """Scrape page after page until we have `limit` paid orders or run out.
+
+    Dedup by `order_no` because the iView "next page" click occasionally lands
+    back on the same data set (the row-text change check in `_go_to_next_page`
+    can flip true during a loading flash even if the eventual rows are
+    identical). If a page contributes zero new order_nos, treat it as the end
+    of pagination instead of looping forever.
+    """
     paid: list[Order] = []
+    seen_paid: set[str] = set()
+    seen_any: set[str] = set()
     page_num = 1
     while True:
         rows = await _scrape_orders_table(page, user)
         statuses = sorted({o.pay_status for o in rows})
-        log.info("[%s] page %d: %d row(s); pay_statuses=%s",
-                 user, page_num, len(rows), statuses)
-        paid.extend(o for o in rows if o.pay_status == PAID_STATUS)
+        new_any = sum(1 for o in rows if o.order_no and o.order_no not in seen_any)
+        log.info("[%s] page %d: %d row(s) (%d new); pay_statuses=%s",
+                 user, page_num, len(rows), new_any, statuses)
+        for o in rows:
+            if not o.order_no:
+                continue
+            seen_any.add(o.order_no)
+            if o.pay_status == PAID_STATUS and o.order_no not in seen_paid:
+                seen_paid.add(o.order_no)
+                paid.append(o)
         if len(paid) >= limit:
+            return paid[:limit]
+        if new_any == 0:
+            log.info("[%s] page %d returned no new order_nos; stopping pagination.",
+                     user, page_num)
             return paid[:limit]
         if not await _go_to_next_page(page):
             return paid[:limit]

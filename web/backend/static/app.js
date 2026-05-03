@@ -1,42 +1,66 @@
-// Vanilla JS — wires up the "Refresh orders" buttons on the Users tab and
-// polls /api/jobs/{id} until the orders fetch completes, then renders the table.
+// Vanilla JS — wires up the single "Query orders" button on the Users tab,
+// polls /api/jobs/{id} until the all-users fetch completes, then renders one
+// combined table sorted by use_date descending.
 
 const POLL_INTERVAL_MS = 1000;
 
+// Delegated click handler — works regardless of script-load timing or
+// whether DOMContentLoaded has already fired by the time we register.
 document.addEventListener("click", (e) => {
-  const btn = e.target.closest(".refresh-orders-btn");
-  if (btn) refreshOrders(btn);
+  const queryBtn = e.target.closest("#query-orders-btn");
+  if (queryBtn) queryAllOrders(queryBtn);
 });
 
-document.addEventListener("DOMContentLoaded", () => {
+// Last fetched orders from the most recent /api/orders/refresh_all run; the
+// venue dropdown re-renders against this in-memory list so toggling the
+// filter is instant and never re-hits the site.
+let lastFetchedOrders = [];
+
+document.addEventListener("change", (e) => {
+  const sel = e.target.closest("#venue-filter");
+  if (sel) renderCombinedOrdersTable(lastFetchedOrders);
+});
+
+function _initOnceReady() {
   const form = document.getElementById("booking-form");
   if (form) initBookingForm(form);
   if (document.getElementById("schedule-log")) initScheduleTab();
-});
+}
+// Actual `_initOnceReady()` invocation is deferred to the very bottom of the
+// file so that all `const`s (e.g. SCHEDULE_COUNTDOWN_MS) are initialized
+// before init helpers run. See `_runInit` at end of file.
 
-async function refreshOrders(btn) {
-  const user = btn.dataset.user;
+async function queryAllOrders(btn) {
+  const status = document.getElementById("orders-status");
+  const logEl = document.getElementById("orders-log");
+  const resultsEl = document.getElementById("orders-results");
   btn.disabled = true;
   btn.textContent = "Starting…";
-  ensureUserOrdersBlock(user, "running", "[launching browser]");
+  status.innerHTML = `<span class="badge run">running</span>`;
+  logEl.style.display = "";
+  logEl.textContent = "";
+  resultsEl.innerHTML = "";
   try {
-    const resp = await fetch("/api/orders/refresh", {
+    const resp = await fetch("/api/orders/refresh_all", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({user, limit: 10}),
+      body: JSON.stringify({limit: 10}),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const {job_id} = await resp.json();
     btn.textContent = "Running…";
-    pollJob(user, job_id, btn);
+    pollAllOrdersJob(job_id, btn);
   } catch (err) {
-    ensureUserOrdersBlock(user, "failed", `[error] ${err.message}`);
+    status.innerHTML = `<span class="badge err">failed</span>`;
+    logEl.textContent += `[error] ${err.message}\n`;
     btn.disabled = false;
-    btn.textContent = "Refresh orders";
+    btn.textContent = "Query orders";
   }
 }
 
-async function pollJob(user, jobId, btn) {
+async function pollAllOrdersJob(jobId, btn) {
+  const status = document.getElementById("orders-status");
+  const logEl = document.getElementById("orders-log");
   let logOffset = 0;
   while (true) {
     let job;
@@ -44,82 +68,49 @@ async function pollJob(user, jobId, btn) {
       const r = await fetch(`/api/jobs/${jobId}?log_offset=${logOffset}`);
       job = await r.json();
     } catch (err) {
-      ensureUserOrdersBlock(user, "failed", `[poll error] ${err.message}`);
+      logEl.textContent += `[poll error] ${err.message}\n`;
       break;
     }
     if (job.logs && job.logs.length) {
-      appendLogs(user, job.logs);
+      logEl.textContent += job.logs.join("\n") + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
       logOffset = job.log_total;
     }
-    setBlockStatus(user, job.status);
+    status.innerHTML = renderStatusBadge(job.status);
     if (job.status === "succeeded") {
-      renderOrdersTable(user, job.result?.orders || []);
+      lastFetchedOrders = job.result?.orders || [];
+      renderCombinedOrdersTable(lastFetchedOrders);
       break;
     }
     if (job.status === "failed") {
-      appendLogs(user, [`[failed] ${job.error}`]);
+      logEl.textContent += `[failed] ${job.error}\n`;
       break;
     }
     await sleep(POLL_INTERVAL_MS);
   }
   btn.disabled = false;
-  btn.textContent = "Refresh orders";
+  btn.textContent = "Query orders";
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function ensureUserOrdersBlock(user, status, initialLog) {
-  const root = document.getElementById("orders-results");
-  let block = root.querySelector(`[data-user-block="${user}"]`);
-  if (!block) {
-    block = document.createElement("div");
-    block.className = "user-orders panel";
-    block.dataset.userBlock = user;
-    block.innerHTML = `
-      <h3>${user} <span class="badge run js-status">${status}</span></h3>
-      <div class="log-tail js-log"></div>
-      <div class="js-table"></div>
-    `;
-    root.prepend(block);
-  } else {
-    block.querySelector(".js-log").textContent = "";
-    block.querySelector(".js-table").innerHTML = "";
-  }
-  if (initialLog) appendLogs(user, [initialLog]);
-  setBlockStatus(user, status);
-  return block;
-}
-
-function setBlockStatus(user, status) {
-  const block = document.querySelector(`[data-user-block="${user}"]`);
-  if (!block) return;
-  const badge = block.querySelector(".js-status");
-  badge.textContent = status;
-  badge.className = "badge js-status " + (
-    status === "succeeded" ? "ok" :
-    status === "failed" ? "err" : "run"
-  );
-}
-
-function appendLogs(user, lines) {
-  const block = document.querySelector(`[data-user-block="${user}"]`);
-  if (!block) return;
-  const log = block.querySelector(".js-log");
-  log.textContent += lines.join("\n") + "\n";
-  log.scrollTop = log.scrollHeight;
-}
-
-function renderOrdersTable(user, orders) {
-  const block = document.querySelector(`[data-user-block="${user}"]`);
-  if (!block) return;
-  const target = block.querySelector(".js-table");
-  if (!orders.length) {
-    target.innerHTML = `<p class="hint">(no paid orders)</p>`;
+function renderCombinedOrdersTable(orders) {
+  const target = document.getElementById("orders-results");
+  const venueSel = document.getElementById("venue-filter");
+  const venueFilter = venueSel ? venueSel.value : "";
+  const filtered = venueFilter
+    ? orders.filter((o) => (o.venue ?? "") === venueFilter)
+    : orders;
+  if (!filtered.length) {
+    const note = venueFilter
+      ? `(no paid orders matching venue "${escapeHtml(venueFilter)}")`
+      : "(no paid orders)";
+    target.innerHTML = `<p class="hint">${note}</p>`;
     return;
   }
-  const cols = ["order_no", "venue", "use_date", "court_and_time", "amount", "order_status", "created_at"];
+  const cols = ["user", "order_no", "venue", "use_date", "court_and_time", "amount", "order_status", "created_at"];
   const head = cols.map((c) => `<th>${c}</th>`).join("");
-  const rows = orders.map((o) =>
+  const rows = filtered.map((o) =>
     "<tr>" + cols.map((c) => `<td>${escapeHtml(o[c] ?? "")}</td>`).join("") + "</tr>"
   ).join("");
   target.innerHTML = `<table class="data"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
@@ -411,4 +402,12 @@ function renderBookingResult(job) {
     <div>${escapeHtml(r.message || "")}</div>
     ${details}
   </div>`;
+}
+
+// Kick off init AFTER all const/function declarations above have been
+// evaluated. With `<script defer>`, parsing is already complete here.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", _initOnceReady);
+} else {
+  _initOnceReady();
 }

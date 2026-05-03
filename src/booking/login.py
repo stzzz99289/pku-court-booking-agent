@@ -37,12 +37,34 @@ async def _session_looks_logged_in(page: Page) -> bool:
     return False
 
 
+async def _dismiss_please_login_modal(page: Page) -> bool:
+    """If the home page is fronted by a '请登录后访问' modal, click 确定. Returns True if dismissed."""
+    modal = page.get_by_text("请登录后访问", exact=True)
+    try:
+        await modal.wait_for(state="visible", timeout=500)
+    except Exception:
+        return False
+    log.info("'请登录后访问' modal detected on home page; dismissing before login.")
+    try:
+        await page.get_by_role("button", name="确定").first.click()
+        await page.wait_for_timeout(300)
+        return True
+    except Exception as e:
+        log.warning("Failed to dismiss '请登录后访问' modal: %s", e)
+        return False
+
+
 async def _open_login_form(page: Page, cfg: AppConfig) -> None:
     """Click the login button to reach the login form, or verify we're already there."""
     if "/venue/login" in page.url:
         return
     if await _alumni_login_form_visible(page):
         return
+
+    # Some sessions land on the home page with a '请登录后访问' modal covering
+    # the login button — dismiss it before probing for the control.
+    await _dismiss_please_login_modal(page)
+
     login_btn = _sel(cfg, "login_button")
     if not login_btn:
         raise ValueError(
@@ -50,7 +72,34 @@ async def _open_login_form(page: Page, cfg: AppConfig) -> None:
             "or set base_url to the login URL (…/venue/login)."
         )
     login_loc = page.locator(login_btn)
+    # SPA race: domcontentloaded can fire before Vue paints the header. Wait
+    # briefly for either the login button OR a logged-in indicator to show up.
+    try:
+        await login_loc.first.wait_for(state="visible", timeout=5_000)
+    except Exception:
+        # Re-check session heuristics — maybe '退出' rendered late and we're
+        # actually already logged in.
+        if await _session_looks_logged_in(page):
+            log.info("Login button never appeared but session indicators visible; treating as logged in.")
+            return
+        # One more chance: dismiss a late-arriving 请登录 modal and retry.
+        if await _dismiss_please_login_modal(page):
+            try:
+                await login_loc.first.wait_for(state="visible", timeout=3_000)
+            except Exception:
+                pass
     if not await login_loc.count():
+        # Dump some context to help next-time debugging.
+        try:
+            url = page.url
+            title = await page.title()
+            body_snip = (await page.locator("body").first.inner_text())[:300]
+        except Exception:
+            url, title, body_snip = "?", "?", "?"
+        log.error(
+            "Login control %r not found. url=%s title=%r body[:300]=%r",
+            login_btn, url, title, body_snip,
+        )
         raise RuntimeError(f"Login control not found: {login_btn!r}")
     await login_loc.first.click()
     await page.wait_for_load_state("domcontentloaded")

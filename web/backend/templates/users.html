@@ -7,7 +7,7 @@
     the modification time of <code>.browser_profile/user_&lt;name&gt;/</code>.</p>
   <table class="data">
     <thead>
-      <tr><th>Name</th><th>Login method</th><th>Account</th><th>Session</th><th>Last used</th><th></th></tr>
+      <tr><th>Name</th><th>Login method</th><th>Account</th><th>Session</th><th>Last used</th></tr>
     </thead>
     <tbody>
       {% for u in users %}
@@ -21,9 +21,6 @@
           {% else %}<span class="badge muted">no profile</span>{% endif %}
         </td>
         <td>{{ u.last_used or "—" }}</td>
-        <td>
-          <button class="btn refresh-orders-btn" data-user="{{ u.name }}">Refresh orders</button>
-        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -32,7 +29,17 @@
 
 <section class="panel">
   <h2>Orders</h2>
-  <p class="hint">Click "Refresh orders" above to launch a job. Results render below per user.</p>
+  <p class="hint">
+    <button class="btn" id="query-orders-btn">Query orders</button>
+    <label for="venue-filter" style="margin-left: 12px;">Venue filter:</label>
+    <select id="venue-filter">
+      <option value="五四体育中心室外网球场" selected>五四体育中心室外网球场</option>
+      <option value="">(all venues)</option>
+    </select>
+    <span style="margin-left: 8px;">— fetches recent paid orders for every user (one by one), newest <code>use_date</code> first.</span>
+  </p>
+  <div id="orders-status"></div>
+  <div class="log-tail" id="orders-log" style="display:none"></div>
   <div id="orders-results"></div>
 </section>
 {% endblock %}
