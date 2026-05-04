@@ -97,6 +97,11 @@ class AppConfig:
     scheduled_time: str = "120000"        # HHMMSS 24-h format
     scheduled_window_minutes: int = 3     # must start within this many minutes before scheduled_time
     scheduled_prep_seconds: int = 90      # webapp scheduler fires this many seconds before scheduled_time
+    # Small delay past `scheduled_time` before the post-fire refresh fires.
+    # The site doesn't release the new bookable date atomically with the
+    # wall-clock second; a tiny offset (default 500 ms) dramatically improves
+    # first-refresh hit rate while still beating other clients to the slot.
+    scheduled_fire_offset_ms: int = 500
     # Populated from the worker's referenced user; set by runner before the booking flow starts.
     account: str = ""
     password: str = ""
@@ -187,6 +192,7 @@ def load_split_config(
         scheduled_time=str(raw.get("scheduled_time", "120000")),
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
+        scheduled_fire_offset_ms=int(raw.get("scheduled_fire_offset_ms", 500)),
         users=users_list,
         workers=workers_list,
         browser=_parse_browser(raw),
@@ -220,6 +226,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         scheduled_time=str(raw.get("scheduled_time", "120000")),
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
+        scheduled_fire_offset_ms=int(raw.get("scheduled_fire_offset_ms", 500)),
         users=users,
         workers=workers,
         browser=_parse_browser(raw),

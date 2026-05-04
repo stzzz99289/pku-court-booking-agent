@@ -14,3 +14,4 @@ scheduled_mode: true
 scheduled_time: "120000"           # HHMMSS — exact submission moment
 scheduled_window_minutes: 3        # max minutes early the booking flow itself may start
 scheduled_prep_seconds: 90         # webapp scheduler fires this many seconds before scheduled_time
+scheduled_fire_offset_ms: 500      # delay past scheduled_time before the post-fire refresh; raises hit rate on the new date

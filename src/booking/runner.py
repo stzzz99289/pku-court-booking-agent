@@ -136,7 +136,18 @@ def _check_schedule_window(cfg: AppConfig) -> BookingResult | None:
 
 
 async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
-    """Sleep until scheduled_time, then refresh the page."""
+    """Sleep until scheduled_time (+offset), then refresh until the target date is released.
+
+    The site doesn't release the new bookable date atomically with the
+    wall-clock second tick — refreshing exactly at `scheduled_time` can
+    return the pre-rollover 3-day window. We mitigate this two ways:
+      1. Wait `scheduled_fire_offset_ms` past the boundary before the first
+         refresh (boosts first-attempt hit rate at minimal latency cost).
+      2. If the target date is still missing after refresh, reload a few
+         more times with a short delay (cheaper than re-navigating, and
+         catches the rare boundary miss). After 12:00:00 the site is under
+         load, so we keep this retry budget tight.
+    """
     target = _parse_scheduled_time(cfg.scheduled_time)
     remaining = (target - datetime.now()).total_seconds()
     if remaining > 0:
@@ -145,22 +156,75 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
             remaining, target.strftime("%H:%M:%S"),
         )
         await asyncio.sleep(remaining)
+    if cfg.scheduled_fire_offset_ms > 0:
+        await asyncio.sleep(cfg.scheduled_fire_offset_ms / 1000)
     log.info("Scheduled time reached — refreshing page.")
-    # Wait for both the page DOM and the schedule API response after reload.
-    async with page.expect_response(
-        lambda r: "reservation/day/info" in r.url, timeout=15_000
-    ) as resp_info:
-        await page.reload(wait_until="domcontentloaded")
-    try:
-        await resp_info.value
-        log.info("Schedule data loaded after refresh.")
-    except Exception:
-        log.warning("Did not capture reservation/day/info response after reload; proceeding anyway.")
-    # Wait for Vue app to render the date buttons after reload. The
-    # retry-with-reload loop covers the case where the post-fire-time
-    # refresh races with a slow `reservation/day/info` response and the
-    # date row never renders on the first try.
-    await _ensure_date_buttons_visible(page)
+    await _refresh_until_target_date_visible(page, cfg)
+
+
+# Refresh budget after `scheduled_time` for the new bookable date to appear.
+# Total worst-case wait at the boundary ≈ N * (reload + delay), kept tight
+# so a real "date never available" config error still surfaces quickly.
+_MAX_DATE_REFRESH_ATTEMPTS = 3
+_DATE_REFRESH_RETRY_DELAY_MS = 500
+
+
+def _format_target_date_label(date_str: str) -> str | None:
+    """YYYYMMDD → 'MM月DD日' as displayed on the .date_box buttons, or None if unparseable."""
+    s = (date_str or "").strip()
+    if len(s) < 8 or not s[:8].isdigit():
+        return None
+    return f"{s[4:6]}月{s[6:8]}日"
+
+
+async def _read_date_button_texts(page) -> list[str]:
+    """Return the inner text of every .date_box button currently rendered."""
+    buttons = page.locator(".date_box > div")
+    count = await buttons.count()
+    return [(await buttons.nth(i).inner_text()).strip() for i in range(count)]
+
+
+async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
+    """Reload until cfg.date appears in the date row, capped by `_MAX_DATE_REFRESH_ATTEMPTS`.
+
+    On the final attempt we still proceed even if the date is missing — the
+    subsequent `select_booking_date` will then return a clear error listing
+    what's actually available, instead of looping silently.
+    """
+    target = _format_target_date_label(cfg.date)
+    for attempt in range(1, _MAX_DATE_REFRESH_ATTEMPTS + 1):
+        async with page.expect_response(
+            lambda r: "reservation/day/info" in r.url, timeout=15_000
+        ) as resp_info:
+            await page.reload(wait_until="domcontentloaded")
+        try:
+            await resp_info.value
+        except Exception:
+            log.warning("Did not capture reservation/day/info response after reload (attempt %d/%d).",
+                        attempt, _MAX_DATE_REFRESH_ATTEMPTS)
+        await _ensure_date_buttons_visible(page)
+
+        if target is None:
+            log.info("Schedule data loaded after refresh.")
+            return
+
+        visible = await _read_date_button_texts(page)
+        if any(target in t for t in visible):
+            log.info("Schedule data loaded after refresh — target date %s visible (attempt %d/%d).",
+                     target, attempt, _MAX_DATE_REFRESH_ATTEMPTS)
+            return
+
+        if attempt < _MAX_DATE_REFRESH_ATTEMPTS:
+            log.warning(
+                "Target date %s not yet released (visible: %s); retrying in %d ms (attempt %d/%d).",
+                target, visible, _DATE_REFRESH_RETRY_DELAY_MS, attempt, _MAX_DATE_REFRESH_ATTEMPTS,
+            )
+            await asyncio.sleep(_DATE_REFRESH_RETRY_DELAY_MS / 1000)
+        else:
+            log.warning(
+                "Target date %s still not visible after %d refreshes (visible: %s); proceeding.",
+                target, _MAX_DATE_REFRESH_ATTEMPTS, visible,
+            )
 
 
 def _print_result(out: BookingResult) -> None:
