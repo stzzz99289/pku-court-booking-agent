@@ -207,7 +207,7 @@ async def page_run(request: Request) -> HTMLResponse:
     prefill = {
         "user": first.user if first else (cfg.users[0].name if cfg.users else ""),
         "date_iso": _yyyymmdd_to_iso(first.date) if first else date.today().isoformat(),
-        "start_time_list": list(first.start_time_list) if first else [],
+        "start_time_list": list(first.active_start_time_list()) if first else [],
         "venue_id": prefill_venue,
     }
     venue_options = [{"id": vid, "name": name} for vid, name in VENUES.items()]
@@ -249,7 +249,7 @@ async def page_schedule(request: Request) -> HTMLResponse:
         {
             "user": w.user,
             "date": w.date,
-            "start_time_list": list(w.start_time_list),
+            "start_time_list": list(w.active_start_time_list()),
         }
         for w in cfg.workers
     ]

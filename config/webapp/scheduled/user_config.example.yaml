@@ -5,7 +5,12 @@
 
 venue_id: 85   # 五四体育中心-室外网球场
 
+# start_time_list_workday and start_time_list_weekend are both required.
+# The runner picks one based on the resolved date's weekday (Mon–Fri →
+# workday, Sat–Sun → weekend). Use the same list for both if you don't
+# want to differentiate.
 workers:
   - user: "alice"
     date: "7-days-later"
-    start_time_list: ['20', '21', '19', '18']
+    start_time_list_workday: ['20', '21', '19', '18']
+    start_time_list_weekend: ['09', '10', '11', '20', '21']

@@ -328,7 +328,7 @@ class Scheduler:
                 continue
             wcfg = per_user_config(cfg, user)
             wcfg.date = w.date
-            wcfg.start_time_list = list(w.start_time_list)
+            wcfg.start_time_list = list(w.active_start_time_list())
             wcfg.headless = True
             # Force scheduled_mode on regardless of YAML — without it the
             # booking flow would submit immediately on the (still-stale) page

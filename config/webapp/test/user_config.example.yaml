@@ -8,10 +8,14 @@
 # override this per click. See VENUES in src/booking/site_constants.py.
 venue_id: 85   # 五四体育中心-室外网球场
 
+# start_time_list_workday and start_time_list_weekend are both required.
+# The runner picks one based on the resolved date's weekday (Mon–Fri →
+# workday, Sat–Sun → weekend).
 workers:
   - user: "alice"
     date: "3-days-later"
-    start_time_list: ['09', '10', '11', '20', '21']
+    start_time_list_workday: ['20', '21', '19']
+    start_time_list_weekend: ['09', '10', '11', '20', '21']
 
 # Optional overrides (anything from site_config.test.yaml).
 # headless: true

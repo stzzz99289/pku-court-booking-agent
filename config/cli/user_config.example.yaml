@@ -39,17 +39,23 @@ captcha:
 # user: must match one of the `name` values in the `users` list above.
 # date: either YYYYMMDD (e.g. "20250327") or "N-days-later" (e.g. "3-days-later"
 #       → resolved at launch time to today + N days; 0 ≤ N ≤ 14).
-# start_time_list: ordered priority list of 2-digit start hours (06–21). Each
-#   entry is a one-hour booking (e.g. '09' → 09:00–10:00). The worker tries
-#   slots in the order given and stops at the first one that succeeds; if a
-#   slot is already booked by someone else, it refreshes and tries the next.
+# start_time_list_workday / start_time_list_weekend: ordered priority lists
+#   of 2-digit start hours (06–21). Each entry is a one-hour booking
+#   (e.g. '09' → 09:00–10:00). The worker tries slots in the order given and
+#   stops at the first one that succeeds; if a slot is already booked by
+#   someone else, it refreshes and tries the next. The list used per run is
+#   picked from the resolved target `date`: Mon–Fri uses *_workday, Sat–Sun
+#   uses *_weekend. Both keys are required (use the same list for both if
+#   you don't want to differentiate).
 workers:
   - user: "alice"
     date: "3-days-later"
-    start_time_list: ['09', '10', '11', '20', '21']
+    start_time_list_workday: ['20', '21', '19']
+    start_time_list_weekend: ['09', '10', '11', '20', '21']
   # - user: "bob"
   #   date: "20250327"
-  #   start_time_list: ['10', '11']
+  #   start_time_list_workday: ['10', '11']
+  #   start_time_list_weekend: ['10', '11']
 
 # Optional: override anything from site_config.yaml, e.g.:
 # browser:

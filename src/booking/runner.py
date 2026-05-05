@@ -478,7 +478,7 @@ def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi
     cfg.password = user.password
     cfg.login_method = user.login_method
     cfg.date = worker.date
-    cfg.start_time_list = list(worker.start_time_list)
+    cfg.start_time_list = list(worker.active_start_time_list())
     # cfg.start_time / cfg.end_time are set by the runner before each attempt.
     if multi:
         cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"user_{user.name}")
@@ -521,7 +521,7 @@ def _print_summary(workers: list[WorkerConfig], all_results: list[BookingResult]
     print("=" * 60)
     for i, (w, result) in enumerate(zip(workers, all_results)):
         status = "SUCCESS" if result.success else "FAILED"
-        slots_str = ",".join(f"{h}:00" for h in w.start_time_list)
+        slots_str = ",".join(f"{h}:00" for h in w.active_start_time_list())
         print(f"  Worker {i} | user={w.user} date={w.date} slots=[{slots_str}] | {status} | {result.message}")
     print("=" * 60)
     succeeded = sum(1 for r in all_results if r.success)

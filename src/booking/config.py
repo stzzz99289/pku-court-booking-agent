@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -74,15 +74,25 @@ class UserConfig:
 class WorkerConfig:
     """Per-worker overrides for multi-worker booking.
 
-    start_time_list is an ordered priority list of 2-digit hour strings
-    (e.g. ['09', '10', '20']). Each entry represents a one-hour booking
-    (start_time='09' → 09:00-10:00). The worker tries them in order and
-    stops as soon as one succeeds; any that return 'slot already booked'
+    Each `start_time_list_*` is an ordered priority list of 2-digit hour
+    strings (e.g. ['09', '10', '20']). Each entry represents a one-hour
+    booking (start_time='09' → 09:00-10:00). The worker tries them in order
+    and stops as soon as one succeeds; any that return 'slot already booked'
     rejections are skipped to try the next.
+
+    Workday vs. weekend lists are picked at runtime based on the resolved
+    target `date` (Mon–Fri → workday, Sat–Sun → weekend), so a single worker
+    entry can cover both kinds of days with different slot preferences.
     """
     user: str  # must match a UserConfig.name
     date: str
-    start_time_list: list[str]
+    start_time_list_workday: list[str]
+    start_time_list_weekend: list[str]
+
+    def active_start_time_list(self) -> list[str]:
+        """Return workday or weekend list based on `self.date`'s weekday."""
+        d = datetime.strptime(self.date, "%Y%m%d").date()
+        return self.start_time_list_weekend if d.weekday() >= 5 else self.start_time_list_workday
 
 
 @dataclass
@@ -286,8 +296,8 @@ def _parse_users(data: dict[str, Any]) -> list[UserConfig]:
     return users
 
 
-def _parse_start_time_list(raw: Any, worker_index: int) -> list[str]:
-    """Validate and normalize a worker's start_time_list.
+def _parse_start_time_list(raw: Any, worker_index: int, field_name: str) -> list[str]:
+    """Validate and normalize a worker's start_time_list_{workday,weekend}.
 
     Each entry must be a 2-digit hour string in the booking window. The list
     must be non-empty; duplicates are allowed (first wins implicitly since
@@ -295,20 +305,20 @@ def _parse_start_time_list(raw: Any, worker_index: int) -> list[str]:
     """
     if not isinstance(raw, list) or not raw:
         raise ValueError(
-            f"workers[{worker_index}].start_time_list must be a non-empty list of 2-digit hour strings."
+            f"workers[{worker_index}].{field_name} must be a non-empty list of 2-digit hour strings."
         )
     out: list[str] = []
     for j, entry in enumerate(raw):
         h = str(entry).strip()
         if not re.fullmatch(r"\d{2}", h):
             raise ValueError(
-                f"workers[{worker_index}].start_time_list[{j}] must be a 2-digit hour string "
+                f"workers[{worker_index}].{field_name}[{j}] must be a 2-digit hour string "
                 f"(e.g. '09'), got {entry!r}."
             )
         hv = int(h)
         if not (6 <= hv <= 21):
             raise ValueError(
-                f"workers[{worker_index}].start_time_list[{j}] hour {hv:02d} is out of range; "
+                f"workers[{worker_index}].{field_name}[{j}] hour {hv:02d} is out of range; "
                 f"must be 06–21 so that end_time = start_time + 1 stays ≤ 22."
             )
         out.append(h)
@@ -325,7 +335,7 @@ def _parse_workers(
     for i, w in enumerate(raw_list):
         if not isinstance(w, dict):
             raise ValueError(f"workers[{i}] must be a mapping, got {type(w).__name__}.")
-        for key in ("user", "date", "start_time_list"):
+        for key in ("user", "date", "start_time_list_workday", "start_time_list_weekend"):
             if key not in w:
                 raise ValueError(f"workers[{i}] is missing required key '{key}'.")
         user_name = str(w["user"]).strip()
@@ -337,7 +347,10 @@ def _parse_workers(
         workers.append(WorkerConfig(
             user=user_name,
             date=_resolve_date(str(w["date"]), i, today=today),
-            start_time_list=_parse_start_time_list(w["start_time_list"], i),
+            start_time_list_workday=_parse_start_time_list(
+                w["start_time_list_workday"], i, "start_time_list_workday"),
+            start_time_list_weekend=_parse_start_time_list(
+                w["start_time_list_weekend"], i, "start_time_list_weekend"),
         ))
     return workers
 

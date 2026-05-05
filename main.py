@@ -101,7 +101,8 @@ def run_print_split_config_command(set_name: str) -> int:
         print(f"    - {u.name}  login_method={u.login_method}  account={u.account[:3]}***")
     print(f"  workers ({len(cfg.workers)}):")
     for w in cfg.workers:
-        print(f"    - user={w.user}  date={w.date}  start_time_list={w.start_time_list}")
+        print(f"    - user={w.user}  date={w.date}  "
+              f"workday={w.start_time_list_workday}  weekend={w.start_time_list_weekend}")
     return 0
 
 
