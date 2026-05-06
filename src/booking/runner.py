@@ -12,6 +12,7 @@ from .booking_flow import (
     agree_and_submit_booking,
     check_booking_rejection,
     confirm_payment,
+    discover_hour_page_boundaries,
     select_booking_date,
     select_court_time,
     solve_booking_captcha,
@@ -148,6 +149,17 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
          catches the rare boundary miss). After 12:00:00 the site is under
          load, so we keep this retry budget tight.
     """
+    # Pre-discover the schedule table's pagination layout from today's already-
+    # loaded schedule. Page sizes are fixed, so the result stays valid after
+    # the post-fire refresh swaps to the new bookable date — this lets the
+    # booking flow burst-click arrows instead of polling between each.
+    if not cfg.hour_page_boundaries:
+        try:
+            cfg.hour_page_boundaries = await discover_hour_page_boundaries(page)
+            log.info("Discovered hour page boundaries: %s", cfg.hour_page_boundaries)
+        except Exception as e:
+            log.warning("Hour-page boundary discovery failed: %s — falling back to polling scroll.", e)
+
     target = _parse_scheduled_time(cfg.scheduled_time)
     remaining = (target - datetime.now()).total_seconds()
     if remaining > 0:
@@ -166,7 +178,7 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
 # Total worst-case wait at the boundary ≈ N * (reload + delay), kept tight
 # so a real "date never available" config error still surfaces quickly.
 _MAX_DATE_REFRESH_ATTEMPTS = 3
-_DATE_REFRESH_RETRY_DELAY_MS = 500
+_DATE_REFRESH_RETRY_DELAY_MS = 200
 
 
 def _format_target_date_label(date_str: str) -> str | None:
@@ -273,29 +285,75 @@ async def _attempt_book_from_priority_list(
     no hour in the list had a free court — the caller should NOT refresh
     again because every priority slot is sold out.
     """
+    # Reset per-attempt state. cfg is the per-worker copy made in
+    # `_apply_worker_config`, but `_attempt_book_from_priority_list` runs
+    # multiple times (refresh-and-rewalk loop) so we must clear caches each
+    # time so a stale pick from a previous attempt can't leak in.
+    cfg.cached_free_slots = {}
+    cfg.target_court_index = -1
+
     # Stage 2: select date (re-select after a refresh; no-op if already active).
+    # `select_booking_date` populates cfg.cached_free_slots from the day/info JSON.
     date_err = await select_booking_date(page, cfg)
     if date_err is not None:
         return page, date_err, None
 
-    # Stage 3: walk the priority list and click the first hour with a free court.
+    # Stage 3: pick (hour, court_idx) directly from the JSON cache when present.
+    # The cache is the same data that populates the DOM (one source of truth),
+    # so if no hour in start_time_list has any free court here, refreshing
+    # won't change that — return early with no DOM walk.
     chosen_hour: str | None = None
     tried: list[str] = []
     transient_hours = 0
-    for hour in cfg.start_time_list:
+
+    cache = cfg.cached_free_slots
+    if cache:
+        cache_pick = None
+        for hour in cfg.start_time_list:
+            tried.append(hour)
+            free_courts = cache.get(int(hour)) or []
+            if free_courts:
+                cache_pick = (hour, free_courts[0])
+                break
+        if cache_pick is None:
+            slots_str = ", ".join(f"{h}:00" for h in tried)
+            return page, BookingResult(
+                False,
+                f"No available courts at any priority slot ({slots_str}); JSON cache shows every hour in start_time_list is sold out.",
+                {"url": page.url, "tried_hours": tried},
+            ), None
+        hour, court_idx = cache_pick
         cfg.start_time = hour
         cfg.end_time = f"{int(hour) + 1:02d}"
-        tried.append(hour)
+        cfg.target_court_index = court_idx
+        log.info("JSON cache picked hour=%s court_idx=%d (free courts at this hour: %s).",
+                 hour, court_idx, cache.get(int(hour)))
         time_err = await select_court_time(page, cfg)
         if time_err is None:
             chosen_hour = hour
-            break
-        # Per-hour outcome — kept at info so a 0/N walk is never silent.
-        is_transient = bool(time_err.details.get("transient"))
-        if is_transient:
-            transient_hours += 1
-        log.info("Hour %s:00 not booked (%s%s).",
-                 hour, "transient: " if is_transient else "", time_err.message)
+        else:
+            is_transient = bool(time_err.details.get("transient"))
+            if is_transient:
+                transient_hours += 1
+            log.info("JSON-cache pick hour=%s court_idx=%d failed (%s%s).",
+                     hour, court_idx, "transient: " if is_transient else "", time_err.message)
+    else:
+        # No cache (parse failed / non-scheduled CLI path): fall back to the
+        # per-hour DOM walk that was the original behaviour.
+        cfg.target_court_index = -1
+        for hour in cfg.start_time_list:
+            cfg.start_time = hour
+            cfg.end_time = f"{int(hour) + 1:02d}"
+            tried.append(hour)
+            time_err = await select_court_time(page, cfg)
+            if time_err is None:
+                chosen_hour = hour
+                break
+            is_transient = bool(time_err.details.get("transient"))
+            if is_transient:
+                transient_hours += 1
+            log.info("Hour %s:00 not booked (%s%s).",
+                     hour, "transient: " if is_transient else "", time_err.message)
 
     if chosen_hour is None:
         slots_str = ", ".join(f"{h}:00" for h in tried)

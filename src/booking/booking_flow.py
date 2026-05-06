@@ -18,6 +18,56 @@ def _sel(cfg: AppConfig, name: str) -> str:
     return s.strip()
 
 
+# `reservationStatus` values in the day/info response (verified empirically):
+#   1 → free (no orderId, useNum=0)               → DOM `.reserveBlock.free`
+#   4 → booked (useNum=1, alreadyNum=1)           → DOM `.reserveBlock.reserved`
+# The "mid-booking" orange state (DOM `.reserveBlock.reservation`) is transient
+# and not observed in JSON snapshots — we treat anything other than 1 as "not
+# free".
+_FREE_STATUS = 1
+
+
+def parse_day_info(payload: dict) -> dict[int, list[int]]:
+    """Parse a `reservation/day/info` JSON body into {hour: [free_court_idx, ...]}.
+
+    `hour` is the start hour as an int (6..21). Court indices are 0-based and
+    match the order courts appear in the response — which is also the order
+    of `tbody tr` court rows in the DOM (1号, 2号, …). Returns {} on any
+    structural mismatch so callers can cleanly fall back to the DOM walk.
+    """
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    space_time_info = data.get("spaceTimeInfo") or []
+    slot_id_to_hour: dict[str, int] = {}
+    for slot in space_time_info:
+        if not isinstance(slot, dict):
+            continue
+        sid = slot.get("id")
+        bt = slot.get("beginTime") or ""
+        if sid is None or len(bt) < 2 or not bt[:2].isdigit():
+            continue
+        slot_id_to_hour[str(sid)] = int(bt[:2])
+
+    date_map = data.get("reservationDateSpaceInfo") or {}
+    if not isinstance(date_map, dict) or not date_map:
+        return {}
+    # Each request returns exactly one date — take its courts list.
+    courts = next(iter(date_map.values()))
+    if not isinstance(courts, list):
+        return {}
+
+    free: dict[int, list[int]] = {}
+    for idx, ct in enumerate(courts):
+        if not isinstance(ct, dict):
+            continue
+        for sid, hour in slot_id_to_hour.items():
+            v = ct.get(sid)
+            if isinstance(v, dict) and v.get("reservationStatus") == _FREE_STATUS:
+                free.setdefault(hour, []).append(idx)
+    return free
+
+
 async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | None:
     """Click the matching date button and wait for the schedule API to respond.
 
@@ -72,9 +122,14 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
             ) as resp_info:
                 await btn.click()
             try:
-                await resp_info.value
-            except Exception:
-                log.warning("Did not capture reservation/day/info response; proceeding anyway.")
+                resp = await resp_info.value
+                cfg.cached_free_slots = parse_day_info(await resp.json())
+                log.info("JSON cache: %d hour(s) with free courts (%s).",
+                         len(cfg.cached_free_slots),
+                         {h: cfg.cached_free_slots[h] for h in sorted(cfg.cached_free_slots)})
+            except Exception as e:
+                log.warning("Did not capture/parse reservation/day/info response (%s); proceeding without cache.", e)
+                cfg.cached_free_slots = {}
             return None
 
     return BookingResult(
@@ -145,7 +200,10 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
         )
 
     header_cells = sched_table.locator("thead td")
-    col_idx = await _scroll_to_target_column(page, header_cells, start, target_time)
+    col_idx = await _scroll_to_target_column(
+        page, header_cells, start, target_time,
+        boundaries=cfg.hour_page_boundaries or None,
+    )
     if col_idx is None:
         return BookingResult(
             False,
@@ -159,6 +217,29 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     #   reserved    → 已售 (sold)
     #   reservation → someone else is mid-booking (orange, empty text — skip)
     court_rows = sched_table.locator("tbody tr")
+
+    # JSON-cache fast path: the runner already picked which court_idx to click.
+    # Walk only court rows (filtering out non-court rows like headers) and click
+    # the row at that index directly. Skips the per-row class check.
+    if cfg.target_court_index >= 0:
+        court_row_indices: list[int] = []
+        for row_i in range(await court_rows.count()):
+            row = court_rows.nth(row_i)
+            first_cell = (await row.locator("td").nth(0).inner_text()).strip()
+            if re.match(r"\d+号", first_cell):
+                court_row_indices.append(row_i)
+        if cfg.target_court_index < len(court_row_indices):
+            row_i = court_row_indices[cfg.target_court_index]
+            row = court_rows.nth(row_i)
+            target_cell = row.locator("td").nth(col_idx)
+            first_cell = (await row.locator("td").nth(0).inner_text()).strip()
+            log.info("Clicking court %s at %s (JSON-cache court_idx=%d).",
+                     first_cell, target_time, cfg.target_court_index)
+            await target_cell.click()
+            return None
+        log.warning("target_court_index=%d out of range (have %d court rows); falling back to row walk.",
+                    cfg.target_court_index, len(court_row_indices))
+
     for row_i in range(await court_rows.count()):
         row = court_rows.nth(row_i)
         cells = row.locator("td")
@@ -204,15 +285,27 @@ def _visible_start_hours(texts: list[str]) -> list[int]:
 
 async def _scroll_to_target_column(
     page: Page, header_cells, target_hour: int, target_time: str,
+    boundaries: list[list[int]] | None = None,
 ) -> int | None:
     """Scroll the schedule table directly to the page containing target_hour.
 
-    Chooses direction from the visible header hours (each arrow click pages
-    ~5 hours at a time) so we never overshoot and scroll the opposite way.
+    Fast path (when `boundaries` is provided — a list of [first_hour, last_hour]
+    per pagination page, pre-discovered via `discover_hour_page_boundaries`):
+    compute the exact number of arrow clicks to reach the target page and
+    burst-click without polling between, then wait once for the target column
+    to appear.
+
+    Slow path: pages one arrow at a time, polling for header text to change.
+    Used when boundaries weren't discovered (e.g. non-scheduled CLI runs).
+
     Returns the matching column index, or None if the target never appeared.
-    Polls for a DOM change after each click (~30 ms typical) instead of using
-    a fixed sleep.
     """
+    if boundaries:
+        idx = await _scroll_via_boundaries(page, header_cells, target_hour, target_time, boundaries)
+        if idx is not None:
+            return idx
+        # Discovery may be stale (rare — page sizes are fixed); fall through.
+
     for _ in range(6):  # 16-hour booking window → ≤3 page jumps each direction.
         texts = await _read_header_texts(header_cells)
         if target_time in texts:
@@ -242,6 +335,127 @@ async def _scroll_to_target_column(
             if new_texts != texts:
                 break
     return None
+
+
+def _page_index_for_hour(hour: int, boundaries: list[list[int]]) -> int | None:
+    for i, rng in enumerate(boundaries):
+        if rng[0] <= hour <= rng[1]:
+            return i
+    return None
+
+
+async def _scroll_via_boundaries(
+    page: Page, header_cells, target_hour: int, target_time: str,
+    boundaries: list[list[int]],
+) -> int | None:
+    """Burst-click arrows to land on the target page using pre-discovered boundaries."""
+    target_page = _page_index_for_hour(target_hour, boundaries)
+    if target_page is None:
+        return None  # target hour outside any known page
+
+    texts = await _read_header_texts(header_cells)
+    if target_time in texts:
+        return texts.index(target_time)
+
+    visible = _visible_start_hours(texts)
+    if not visible:
+        return None  # let slow path handle empty-header case
+    current_page = _page_index_for_hour(min(visible), boundaries)
+    if current_page is None:
+        return None  # current page doesn't match any known boundary — fall back
+
+    delta = target_page - current_page
+    if delta == 0:
+        return None  # in target page but target_time not listed (hour not offered)
+
+    arrow_sel = (
+        "div.arrowWrap i.ivu-icon-ios-arrow-forward" if delta > 0
+        else "div.arrowWrap i.ivu-icon-ios-arrow-back"
+    )
+    arrow = page.locator(arrow_sel).first
+    if not await arrow.count():
+        return None
+    for _ in range(abs(delta)):
+        await arrow.click()
+
+    # Wait for the target column header to render (DOM settles ~30 ms per page jump).
+    for _ in range(40):  # up to ~400 ms
+        await asyncio.sleep(0.01)
+        texts = await _read_header_texts(header_cells)
+        if target_time in texts:
+            return texts.index(target_time)
+    return None
+
+
+async def discover_hour_page_boundaries(page: Page) -> list[list[int]]:
+    """Walk the schedule pagination to record the hour range of each page.
+
+    Caller must ensure the schedule table is loaded (date selected). Scrolls
+    all the way left first, then forward through every page recording
+    `[first_hour, last_hour]`, and stops when no further forward click changes
+    the headers. Page sizes are fixed on this site, so the result stays valid
+    after the post-fire refresh switches to a different bookable date.
+    """
+    sched_table = page.locator(".spaceTable table")
+    header_cells = sched_table.locator("thead td")
+    try:
+        await header_cells.nth(1).wait_for(state="visible", timeout=5_000)
+    except Exception:
+        return []
+
+    back = page.locator("div.arrowWrap i.ivu-icon-ios-arrow-back").first
+    fwd = page.locator("div.arrowWrap i.ivu-icon-ios-arrow-forward").first
+
+    async def _click_until_unchanged(arrow) -> None:
+        for _ in range(10):
+            if not await arrow.count():
+                return
+            prev = await _read_header_texts(header_cells)
+            try:
+                await arrow.click(timeout=500)
+            except Exception:
+                return
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                new = await _read_header_texts(header_cells)
+                if new != prev:
+                    break
+            else:
+                return  # headers didn't change — at edge
+
+    # Scroll to leftmost page so discovery starts from a known state.
+    await _click_until_unchanged(back)
+
+    pages: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    for _ in range(10):  # safety cap; the booking window is 16 hours.
+        texts = await _read_header_texts(header_cells)
+        hours = _visible_start_hours(texts)
+        if not hours:
+            break
+        key = tuple(hours)
+        if key in seen:
+            break
+        seen.add(key)
+        pages.append([min(hours), max(hours)])
+        if not await fwd.count():
+            break
+        prev = texts
+        try:
+            await fwd.click(timeout=500)
+        except Exception:
+            break
+        changed = False
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            new = await _read_header_texts(header_cells)
+            if new != prev:
+                changed = True
+                break
+        if not changed:
+            break
+
+    return pages
 
 
 async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
@@ -413,7 +627,7 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         log.info("Click-captcha coords (attempt %d, dpr=%s): %s (chars: %s)", attempt + 1, dpr, coords, label)
         for x, y in coords:
             await img_loc.click(position={"x": x / dpr, "y": y / dpr})
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.1)
 
         # Poll for success conditions: trade page opened in a (new) tab, rejection
         # modal, or captcha genuinely dismissed. Tight interval so the payment

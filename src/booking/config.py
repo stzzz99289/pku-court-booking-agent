@@ -126,6 +126,21 @@ class AppConfig:
     # booking_flow. `end_time` is always `start_time + 1` (one-hour bookings).
     start_time: str = ""
     end_time: str = ""
+    # Discovered once during the scheduled-mode wait by walking today's already-
+    # loaded schedule's pagination arrows. Each entry is [first_hour, last_hour]
+    # visible on that page, in left-to-right order (e.g.
+    # [[6, 10], [11, 15], [16, 20], [21, 21]]). Lets `_scroll_to_target_column`
+    # jump directly to the right page instead of one-arrow-at-a-time polling.
+    hour_page_boundaries: list[list[int]] = field(default_factory=list)
+    # Populated by `select_booking_date` from the `reservation/day/info`
+    # response: hour (int 6..21) → list of court row indices (0-based, in DOM
+    # order matching `tbody tr` after filtering to court rows) that have
+    # reservationStatus == 1 (free). Lets the runner pick (hour, court_idx)
+    # directly from JSON instead of scanning the DOM cell-by-cell.
+    cached_free_slots: dict[int, list[int]] = field(default_factory=dict)
+    # Set by the runner before calling `select_court_time` when the JSON cache
+    # picked a specific court row. -1 means "fall back to row-walk".
+    target_court_index: int = -1
     users: list[UserConfig] = field(default_factory=list)
     workers: list[WorkerConfig] = field(default_factory=list)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
