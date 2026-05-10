@@ -155,7 +155,8 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
     # booking flow burst-click arrows instead of polling between each.
     if not cfg.hour_page_boundaries:
         try:
-            cfg.hour_page_boundaries = await discover_hour_page_boundaries(page)
+            with cfg.profiler.span("discover_hour_page_boundaries"):
+                cfg.hour_page_boundaries = await discover_hour_page_boundaries(page)
             log.info("Discovered hour page boundaries: %s", cfg.hour_page_boundaries)
         except Exception as e:
             log.warning("Hour-page boundary discovery failed: %s — falling back to polling scroll.", e)
@@ -170,8 +171,12 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
         await asyncio.sleep(remaining)
     if cfg.scheduled_fire_offset_ms > 0:
         await asyncio.sleep(cfg.scheduled_fire_offset_ms / 1000)
+    # Reset profiler t0 to the scheduled-fire moment so all booking-flow stage
+    # offsets are measured relative to the wall-clock release tick.
+    cfg.profiler.begin("scheduled_fire")
     log.info("Scheduled time reached — refreshing page.")
-    await _refresh_until_target_date_visible(page, cfg)
+    with cfg.profiler.span("post_fire_refresh"):
+        await _refresh_until_target_date_visible(page, cfg)
 
 
 # Refresh budget after `scheduled_time` for the new bookable date to appear.
@@ -294,7 +299,8 @@ async def _attempt_book_from_priority_list(
 
     # Stage 2: select date (re-select after a refresh; no-op if already active).
     # `select_booking_date` populates cfg.cached_free_slots from the day/info JSON.
-    date_err = await select_booking_date(page, cfg)
+    with cfg.profiler.span("select_booking_date"):
+        date_err = await select_booking_date(page, cfg)
     if date_err is not None:
         return page, date_err, None
 
@@ -328,7 +334,8 @@ async def _attempt_book_from_priority_list(
         cfg.target_court_index = court_idx
         log.info("JSON cache picked hour=%s court_idx=%d (free courts at this hour: %s).",
                  hour, court_idx, cache.get(int(hour)))
-        time_err = await select_court_time(page, cfg)
+        with cfg.profiler.span("select_court_time(cache)"):
+            time_err = await select_court_time(page, cfg)
         if time_err is None:
             chosen_hour = hour
         else:
@@ -345,7 +352,8 @@ async def _attempt_book_from_priority_list(
             cfg.start_time = hour
             cfg.end_time = f"{int(hour) + 1:02d}"
             tried.append(hour)
-            time_err = await select_court_time(page, cfg)
+            with cfg.profiler.span(f"select_court_time(dom h={hour})"):
+                time_err = await select_court_time(page, cfg)
             if time_err is None:
                 chosen_hour = hour
                 break
@@ -380,7 +388,8 @@ async def _attempt_book_from_priority_list(
             True, HINT_AFTER_BOOKING_FORM,
             {"stopped_at": "after_court_selection", "final_url": page.url},
         ), chosen_hour
-    await agree_and_submit_booking(page, cfg)
+    with cfg.profiler.span("agree_and_submit_booking"):
+        await agree_and_submit_booking(page, cfg)
 
     rejection = await check_booking_rejection(page)
     if rejection is not None:
@@ -394,7 +403,8 @@ async def _attempt_book_from_priority_list(
                 "Click-captcha appeared (请完成安全验证). Debug mode — solve it manually or close the browser.",
                 {"stopped_at": "captcha"},
             ), chosen_hour
-        captcha_err = await solve_booking_captcha(page, click_solver, cfg)
+        with cfg.profiler.span("solve_booking_captcha"):
+            captcha_err = await solve_booking_captcha(page, click_solver, cfg)
         if captcha_err is not None:
             return page, captcha_err, chosen_hour
         rejection = await check_booking_rejection(page)
@@ -402,7 +412,8 @@ async def _attempt_book_from_priority_list(
             return page, rejection, chosen_hour
 
     # Stage 6: confirm payment (may switch page to a new trade tab).
-    page, result = await confirm_payment(page, cfg)
+    with cfg.profiler.span("confirm_payment"):
+        page, result = await confirm_payment(page, cfg)
     return page, result, chosen_hour
 
 
@@ -422,6 +433,7 @@ async def run(
             return window_err
 
     login_solver, click_solver = _make_solvers(cfg)
+    cfg.profiler.begin("run_start")
     context, _ = await launch_persistent_context(cfg)
     page = context.pages[0] if context.pages else await context.new_page()
     out: BookingResult | None = None
@@ -432,8 +444,10 @@ async def run(
         if not login_automation_ready(cfg):
             out = BookingResult(True, HINT_AFTER_NAVIGATE, {"stopped_at": "after_navigate", "final_url": page.url})
         else:
-            await ensure_logged_in(page, cfg, login_solver)
-            await _navigate_to_reservation(page, cfg, login_solver)
+            with cfg.profiler.span("ensure_logged_in"):
+                await ensure_logged_in(page, cfg, login_solver)
+            with cfg.profiler.span("navigate_to_reservation"):
+                await _navigate_to_reservation(page, cfg, login_solver)
 
             # Scheduled mode: wait at the reservation page, then refresh.
             if cfg.scheduled_mode:
@@ -507,6 +521,9 @@ async def run(
     finally:
         if out is not None:
             _print_result(out)
+        report = cfg.profiler.report()
+        if report:
+            print(report)
         await wait_until_user_closes_window(cfg, page)
         await dispose_context(context)
 

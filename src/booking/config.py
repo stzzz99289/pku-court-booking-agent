@@ -10,6 +10,7 @@ import copy
 
 import yaml
 
+from .profiler import Profiler
 from .site_constants import SITE_DEFAULTS
 
 # Upper bound for "N-days-later" dates. PKU's system typically opens bookings
@@ -141,6 +142,11 @@ class AppConfig:
     # Set by the runner before calling `select_court_time` when the JSON cache
     # picked a specific court row. -1 means "fall back to row-walk".
     target_court_index: int = -1
+    # When true, the booking flow records per-stage latencies via `cfg.profiler`
+    # and prints a summary at the end. Off by default so production runs pay
+    # zero overhead (`Profiler.span` becomes a no-op when disabled).
+    profile: bool = False
+    profiler: Profiler = field(default_factory=Profiler)
     users: list[UserConfig] = field(default_factory=list)
     workers: list[WorkerConfig] = field(default_factory=list)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
@@ -206,6 +212,7 @@ def load_split_config(
     workers_list = _parse_workers(raw, users_list, today=today)
     if not workers_list:
         raise ValueError(f"{workers_path} must define at least one worker.")
+    profile_flag = bool(raw.get("profile", False))
     return AppConfig(
         base_url=str(raw["base_url"]),
         user_data_dir=str(raw["user_data_dir"]),
@@ -218,6 +225,8 @@ def load_split_config(
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
         scheduled_fire_offset_ms=int(raw.get("scheduled_fire_offset_ms", 500)),
+        profile=profile_flag,
+        profiler=Profiler(enabled=profile_flag),
         users=users_list,
         workers=workers_list,
         browser=_parse_browser(raw),
@@ -240,6 +249,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
     workers = _parse_workers(raw, users)
     if not workers:
         raise ValueError("At least one worker must be configured in the 'workers' list.")
+    profile_flag = bool(raw.get("profile", False))
     return AppConfig(
         base_url=str(raw["base_url"]),
         user_data_dir=str(raw["user_data_dir"]),
@@ -252,6 +262,8 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
         scheduled_fire_offset_ms=int(raw.get("scheduled_fire_offset_ms", 500)),
+        profile=profile_flag,
+        profiler=Profiler(enabled=profile_flag),
         users=users,
         workers=workers,
         browser=_parse_browser(raw),

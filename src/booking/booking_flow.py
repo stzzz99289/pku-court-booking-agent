@@ -117,18 +117,25 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
                 return None
             log.info("Selecting date: %s", target)
             # Wait for the schedule API response before returning so the table is fresh.
-            async with page.expect_response(
-                lambda r: "reservation/day/info" in r.url, timeout=10_000
-            ) as resp_info:
-                await btn.click()
+            with cfg.profiler.span("date_click_and_xhr"):
+                async with page.expect_response(
+                    lambda r: "reservation/day/info" in r.url, timeout=10_000
+                ) as resp_info:
+                    await btn.click()
+                try:
+                    resp = await resp_info.value
+                except Exception as e:
+                    log.warning("Did not capture reservation/day/info response (%s); proceeding without cache.", e)
+                    cfg.cached_free_slots = {}
+                    return None
             try:
-                resp = await resp_info.value
-                cfg.cached_free_slots = parse_day_info(await resp.json())
+                with cfg.profiler.span("parse_day_info_json"):
+                    cfg.cached_free_slots = parse_day_info(await resp.json())
                 log.info("JSON cache: %d hour(s) with free courts (%s).",
                          len(cfg.cached_free_slots),
                          {h: cfg.cached_free_slots[h] for h in sorted(cfg.cached_free_slots)})
             except Exception as e:
-                log.warning("Did not capture/parse reservation/day/info response (%s); proceeding without cache.", e)
+                log.warning("Could not parse reservation/day/info body (%s); proceeding without cache.", e)
                 cfg.cached_free_slots = {}
             return None
 
@@ -177,7 +184,8 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     # priority list as exhausted when the schedule data simply hadn't loaded.
     sched_table = page.locator(".spaceTable table")
     try:
-        await sched_table.locator("thead td").nth(1).wait_for(state="visible", timeout=10_000)
+        with cfg.profiler.span("wait_schedule_header"):
+            await sched_table.locator("thead td").nth(1).wait_for(state="visible", timeout=10_000)
     except Exception:
         return BookingResult(
             False,
@@ -189,9 +197,10 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     # re-renders about 300 ms later. Headers keep stale values during the gap,
     # so wait for the tbody to repopulate before scanning for a slot.
     try:
-        await page.locator(".spaceTable table tbody tr").nth(1).wait_for(
-            state="visible", timeout=5_000
-        )
+        with cfg.profiler.span("wait_schedule_tbody"):
+            await page.locator(".spaceTable table tbody tr").nth(1).wait_for(
+                state="visible", timeout=5_000
+            )
     except Exception:
         return BookingResult(
             False,
@@ -200,10 +209,11 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
         )
 
     header_cells = sched_table.locator("thead td")
-    col_idx = await _scroll_to_target_column(
-        page, header_cells, start, target_time,
-        boundaries=cfg.hour_page_boundaries or None,
-    )
+    with cfg.profiler.span("scroll_to_target_column"):
+        col_idx = await _scroll_to_target_column(
+            page, header_cells, start, target_time,
+            boundaries=cfg.hour_page_boundaries or None,
+        )
     if col_idx is None:
         return BookingResult(
             False,
@@ -222,21 +232,22 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     # Walk only court rows (filtering out non-court rows like headers) and click
     # the row at that index directly. Skips the per-row class check.
     if cfg.target_court_index >= 0:
-        court_row_indices: list[int] = []
-        for row_i in range(await court_rows.count()):
-            row = court_rows.nth(row_i)
-            first_cell = (await row.locator("td").nth(0).inner_text()).strip()
-            if re.match(r"\d+号", first_cell):
-                court_row_indices.append(row_i)
-        if cfg.target_court_index < len(court_row_indices):
-            row_i = court_row_indices[cfg.target_court_index]
-            row = court_rows.nth(row_i)
-            target_cell = row.locator("td").nth(col_idx)
-            first_cell = (await row.locator("td").nth(0).inner_text()).strip()
-            log.info("Clicking court %s at %s (JSON-cache court_idx=%d).",
-                     first_cell, target_time, cfg.target_court_index)
-            await target_cell.click()
-            return None
+        with cfg.profiler.span("click_court_cell(cache)"):
+            court_row_indices: list[int] = []
+            for row_i in range(await court_rows.count()):
+                row = court_rows.nth(row_i)
+                first_cell = (await row.locator("td").nth(0).inner_text()).strip()
+                if re.match(r"\d+号", first_cell):
+                    court_row_indices.append(row_i)
+            if cfg.target_court_index < len(court_row_indices):
+                row_i = court_row_indices[cfg.target_court_index]
+                row = court_rows.nth(row_i)
+                target_cell = row.locator("td").nth(col_idx)
+                first_cell = (await row.locator("td").nth(0).inner_text()).strip()
+                log.info("Clicking court %s at %s (JSON-cache court_idx=%d).",
+                         first_cell, target_time, cfg.target_court_index)
+                await target_cell.click()
+                return None
         log.warning("target_court_index=%d out of range (have %d court rows); falling back to row walk.",
                     cfg.target_court_index, len(court_row_indices))
 
@@ -468,20 +479,22 @@ async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
 
     submit = _sel(cfg, "booking_submit")
     if submit:
-        await page.locator(submit).first.click()
+        with cfg.profiler.span("click_submit"):
+            await page.locator(submit).first.click()
         # Poll for whichever outcome state shows up first — captcha dialog,
         # server rejection modal, or payment tab — rather than a fixed sleep.
         # Bails out as soon as any signal is seen (typically < 200 ms); caps at
         # ~2 s if nothing ever appears (caller then handles it).
         ctx = page.context
-        for _ in range(40):
-            if await page.locator(".verifybox").first.is_visible():
-                return
-            if await _read_system_error_modal(page):
-                return
-            if any("tradeNo=" in p.url for p in ctx.pages):
-                return
-            await asyncio.sleep(0.05)
+        with cfg.profiler.span("wait_post_submit_outcome"):
+            for _ in range(40):
+                if await page.locator(".verifybox").first.is_visible():
+                    return
+                if await _read_system_error_modal(page):
+                    return
+                if any("tradeNo=" in p.url for p in ctx.pages):
+                    return
+                await asyncio.sleep(0.05)
 
 
 _BOOKING_CAPTCHA_MAX_RETRIES = 3
@@ -587,10 +600,11 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         # .verifybox becomes visible, so give it a short window to attach.
         img_loc = page.locator(".verify-img-panel img").first
         try:
-            await img_loc.wait_for(state="visible", timeout=3_000)
+            with cfg.profiler.span(f"captcha_screenshot[{attempt + 1}]"):
+                await img_loc.wait_for(state="visible", timeout=3_000)
+                png = await img_loc.screenshot()
         except Exception:
             return BookingResult(False, "Booking captcha dialog visible but image element not found.", {})
-        png = await img_loc.screenshot()
 
         # Extract instruction chars from "请依次点击【转,线,导】" (or 【转线导】).
         label = ""
@@ -615,7 +629,8 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         # Solve via codetype 9801: comma-separated instruction → one (x,y) per char.
         instruction = ",".join(label)
         try:
-            coords = await click_solver.solve_click(png, instruction)
+            with cfg.profiler.span(f"captcha_solve_api[{attempt + 1}]"):
+                coords = await click_solver.solve_click(png, instruction)
         except Exception as e:
             # Transient API errors (e.g. -3002 系统超时, network blips) — burn this
             # attempt and try again on the next iteration with a fresh screenshot.
@@ -625,22 +640,24 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             continue
         dpr = await page.evaluate("window.devicePixelRatio") or 1
         log.info("Click-captcha coords (attempt %d, dpr=%s): %s (chars: %s)", attempt + 1, dpr, coords, label)
-        for x, y in coords:
-            await img_loc.click(position={"x": x / dpr, "y": y / dpr})
-            await asyncio.sleep(0.1)
+        with cfg.profiler.span(f"captcha_clicks[{attempt + 1}]"):
+            for x, y in coords:
+                await img_loc.click(position={"x": x / dpr, "y": y / dpr})
+                await asyncio.sleep(0.1)
 
         # Poll for success conditions: trade page opened in a (new) tab, rejection
         # modal, or captcha genuinely dismissed. Tight interval so the payment
         # tab is claimed the moment it appears — total budget stays ~3 s.
-        for _ in range(30):  # ~3 s at 0.1 s intervals.
-            await asyncio.sleep(0.1)
-            if _find_trade_page(ctx) is not None:
-                return None  # Payment page appeared — booking accepted.
-            error_text = await _read_system_error_modal(page)
-            if error_text:
-                return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
-            if not await verifybox.is_visible():
-                return None  # Captcha dismissed — success.
+        with cfg.profiler.span(f"captcha_wait_outcome[{attempt + 1}]"):
+            for _ in range(30):  # ~3 s at 0.1 s intervals.
+                await asyncio.sleep(0.1)
+                if _find_trade_page(ctx) is not None:
+                    return None  # Payment page appeared — booking accepted.
+                error_text = await _read_system_error_modal(page)
+                if error_text:
+                    return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
+                if not await verifybox.is_visible():
+                    return None  # Captcha dismissed — success.
         log.warning("Click-captcha still visible after attempt %d/%d, retrying.",
                     attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
 
@@ -670,20 +687,21 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
     # After captcha the SPA either opens a new tab with `?tradeNo=...` or pops
     # a '系统提示' modal explaining the rejection. Poll tightly so the payment
     # tab is claimed the moment it appears (total budget stays ~10 s).
-    for _ in range(200):  # ~10 s at 0.05 s intervals.
-        trade_page = _find_trade_page(ctx)
-        if trade_page is not None:
-            break
-        error_text = await _read_system_error_modal(page)
-        if error_text:
-            return page, BookingResult(
-                False,
-                f"Booking rejected by site: {error_text}",
-                {"url": page.url},
-            )
-        await asyncio.sleep(0.05)
-    else:
-        log.warning("Neither payment URL nor error modal appeared within the timeout.")
+    with cfg.profiler.span("wait_for_trade_page"):
+        for _ in range(200):  # ~10 s at 0.05 s intervals.
+            trade_page = _find_trade_page(ctx)
+            if trade_page is not None:
+                break
+            error_text = await _read_system_error_modal(page)
+            if error_text:
+                return page, BookingResult(
+                    False,
+                    f"Booking rejected by site: {error_text}",
+                    {"url": page.url},
+                )
+            await asyncio.sleep(0.05)
+        else:
+            log.warning("Neither payment URL nor error modal appeared within the timeout.")
 
     # If the payment page opened in a new tab, switch to it and close the old
     # reservation tab so only one window is left when the program ends.
@@ -699,7 +717,8 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
     # Wait for the Vue SPA to finish loading data (the <b> amount defaults to
     # "0" until the API response populates it).
     try:
-        await page.wait_for_load_state("networkidle", timeout=10_000)
+        with cfg.profiler.span("trade_page_networkidle"):
+            await page.wait_for_load_state("networkidle", timeout=10_000)
     except Exception:
         log.warning("Trade page did not reach networkidle within 10 s; reading amount anyway.")
 
@@ -725,7 +744,8 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
     if not await pay_btn.count():
         return page, BookingResult(False, f"Pay button not found (selector: {pay_sel}).", {"url": page.url})
     log.info("Clicking pay button (amount ¥%s).", amount)
-    await pay_btn.click()
+    with cfg.profiler.span("click_pay"):
+        await pay_btn.click()
 
     if amount > 0:
         if cfg.headless:

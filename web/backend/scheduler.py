@@ -38,6 +38,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 LOG_FILE = DATA_DIR / "scheduled_last_run.log"
 META_FILE = DATA_DIR / "scheduled_last_run.json"
+# Per-day profile dumps written when `profile: true` is set in the scheduled
+# user_config. One file per fire date so multiple days can be compared by
+# eyeballing `data/profiles/scheduled_YYYYMMDD.json`.
+PROFILES_DIR = DATA_DIR / "profiles"
 
 LOG_RING_CAPACITY = 10_000
 RETRY_AFTER_CONFIG_ERROR_S = 60
@@ -266,9 +270,10 @@ class Scheduler:
         log.info("scheduler: firing scheduled run; %d worker(s) will start in parallel.",
                  len(cfg.workers))
         results: list[BookingResult] = []
+        worker_profiles: list[dict[str, Any]] = []
         errors: list[str] = []
         try:
-            results = await self._run_workers(cfg)
+            results, worker_profiles = await self._run_workers(cfg)
             log.info("scheduler: run finished. %d/%d worker(s) succeeded.",
                      sum(1 for r in results if r.success), len(results))
         except Exception as e:
@@ -295,8 +300,40 @@ class Scheduler:
                 )
             except Exception as e:
                 log.warning("scheduler: could not write %s: %s", META_FILE, e)
+            if worker_profiles:
+                self._write_profiles(started_at, finished_at, worker_profiles)
             self.state = "waiting"
             self.current_logs = None  # waiting view will re-read from disk
+
+    def _write_profiles(
+        self, started_at: float, finished_at: float,
+        worker_profiles: list[dict[str, Any]],
+    ) -> None:
+        """Write `data/profiles/scheduled_YYYYMMDD.json` with each worker's spans.
+
+        The filename uses the fire date (local time of `started_at`) so multiple
+        scheduled runs on the same day overwrite — by design we keep one file
+        per day, which is enough for week-over-week comparison. If two fires
+        ever land on the same date (e.g. a manual re-run), the later one wins.
+        """
+        try:
+            PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+            date_str = datetime.fromtimestamp(started_at).strftime("%Y%m%d")
+            path = PROFILES_DIR / f"scheduled_{date_str}.json"
+            payload = {
+                "fire_date": date_str,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_s": round(finished_at - started_at, 1),
+                "workers": worker_profiles,
+            }
+            path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            log.info("scheduler: wrote profile dump to %s", path)
+        except Exception as e:
+            log.warning("scheduler: could not write profile dump: %s", e)
 
     @staticmethod
     def _serialize_result(r: BookingResult) -> dict[str, Any]:
@@ -309,17 +346,23 @@ class Scheduler:
             return {"success": r.success, "message": r.message,
                     "details": {"_repr": repr(r.details)}}
 
-    async def _run_workers(self, cfg: AppConfig) -> list[BookingResult]:
+    async def _run_workers(
+        self, cfg: AppConfig,
+    ) -> tuple[list[BookingResult], list[dict[str, Any]]]:
         """Run each worker's booking flow concurrently in the same process.
 
         Each worker gets its own per-user browser profile dir, so persistent
         contexts don't lock each other. We can't reuse runner.run_all here:
         it spawns child processes for N>1, which would break log capture.
+
+        Returns (results, profiles). `profiles` is empty when `cfg.profile`
+        is false; otherwise each entry is a per-worker dump with stage events.
         """
         if not cfg.workers:
             log.info("scheduler: no workers configured; skipping.")
-            return []
+            return [], []
         coros = []
+        worker_meta: list[tuple[int, str, AppConfig]] = []
         for idx, w in enumerate(cfg.workers):
             user = next((u for u in cfg.users if u.name == w.user), None)
             if user is None:
@@ -335,7 +378,24 @@ class Scheduler:
             # instead of waiting at the reservation page for scheduled_time.
             wcfg.scheduled_mode = True
             coros.append(self._run_one(wcfg, w.user, idx))
-        return await asyncio.gather(*coros)
+            worker_meta.append((idx, w.user, wcfg))
+        results = await asyncio.gather(*coros)
+        profiles: list[dict[str, Any]] = []
+        if cfg.profile:
+            for (idx, user_name, wcfg), result in zip(worker_meta, results):
+                events = [
+                    {"name": name, "t_offset_ms": round(off, 1), "duration_ms": round(dur, 1)}
+                    for name, off, dur in wcfg.profiler.events
+                ]
+                profiles.append({
+                    "index": idx,
+                    "user": user_name,
+                    "date": wcfg.date,
+                    "start_time_list": list(wcfg.start_time_list),
+                    "result": self._serialize_result(result),
+                    "events": events,
+                })
+        return list(results), profiles
 
     async def _run_one(self, cfg: AppConfig, user_name: str, idx: int) -> BookingResult:
         # Set the per-task label so every log line emitted inside this
