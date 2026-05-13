@@ -22,6 +22,12 @@ log = logging.getLogger(__name__)
 _API_URL = "http://upload.chaojiying.net/Upload/Processing.php"
 _CODETYPE_BOOKING = "9801"  # locate specific chars by instruction; returns coords in order
 
+# Per-call deadline. The SDK occasionally hangs to its default 30 s timeout;
+# bound it tightly and retry once so the outer booking loop sees a fast
+# signal (worst case 2*8 s instead of 30 s).
+_PER_CALL_TIMEOUT_S = 8.0
+_MAX_CALL_ATTEMPTS = 2
+
 
 class ChaojiyingSolver:
     """Solve PKU booking click-captchas via the Chaojiying HTTP API (codetype 9801)."""
@@ -48,8 +54,24 @@ class ChaojiyingSolver:
             "file_base64": base64.b64encode(image_bytes).decode(),
             "str_debug": f"{{8a:{instruction}/8a}}",
         }
-        async with httpx.AsyncClient(trust_env=False, timeout=30.0) as client:
-            resp = await client.post(_API_URL, data=data)
+        async with httpx.AsyncClient(trust_env=False, timeout=_PER_CALL_TIMEOUT_S) as client:
+            resp = None
+            last_exc: Exception | None = None
+            for attempt in range(1, _MAX_CALL_ATTEMPTS + 1):
+                try:
+                    resp = await client.post(_API_URL, data=data)
+                    last_exc = None
+                    break
+                except httpx.TimeoutException as e:
+                    last_exc = e
+                    log.warning(
+                        "Chaojiying API timed out after %.1fs (attempt %d/%d).",
+                        _PER_CALL_TIMEOUT_S, attempt, _MAX_CALL_ATTEMPTS,
+                    )
+            if resp is None:
+                raise RuntimeError(
+                    f"Chaojiying API exhausted {_MAX_CALL_ATTEMPTS} timeout attempts."
+                ) from last_exc
             result = resp.json()
         err_no = result.get("err_no", -1)
         if err_no != 0:

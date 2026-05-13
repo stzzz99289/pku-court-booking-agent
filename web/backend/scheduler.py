@@ -377,6 +377,10 @@ class Scheduler:
             # booking flow would submit immediately on the (still-stale) page
             # instead of waiting at the reservation page for scheduled_time.
             wcfg.scheduled_mode = True
+            # Per-worker index drives the post-fire stagger in
+            # `_wait_for_scheduled_time` — spreads the first XHR so workers
+            # don't all hit the throttled day_info endpoint simultaneously.
+            wcfg.worker_index = idx
             coros.append(self._run_one(wcfg, w.user, idx))
             worker_meta.append((idx, w.user, wcfg))
         results = await asyncio.gather(*coros)

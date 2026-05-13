@@ -174,9 +174,26 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
     # Reset profiler t0 to the scheduled-fire moment so all booking-flow stage
     # offsets are measured relative to the wall-clock release tick.
     cfg.profiler.begin("scheduled_fire")
+    # Per-worker stagger: spread workers' first XHR over a small window so they
+    # don't all race the same throttled `day_info` endpoint at the fire
+    # instant. The first worker (index 0) doesn't wait; subsequent workers
+    # sleep `worker_index * worker_stagger_ms`.
+    stagger_ms = cfg.worker_index * cfg.worker_stagger_ms
+    if stagger_ms > 0:
+        log.info("Worker %d: applying %dms post-fire stagger.", cfg.worker_index, stagger_ms)
+        await asyncio.sleep(stagger_ms / 1000)
     log.info("Scheduled time reached — refreshing page.")
     with cfg.profiler.span("post_fire_refresh"):
-        await _refresh_until_target_date_visible(page, cfg)
+        # Try fast in-place XHR poll first; if it can't confirm the target
+        # date within its budget (or the Vue handle isn't reachable), fall
+        # back to the legacy reload loop. Whether the in-place path actually
+        # observes the 12:00 release without a full reload can only be
+        # verified at a real fire — the profile distinguishes the two
+        # branches via `post_fire_reload_fallback`.
+        fast = await _xhr_poll_until_target_date_released(page, cfg)
+        if not fast:
+            with cfg.profiler.span("post_fire_reload_fallback"):
+                await _refresh_until_target_date_visible(page, cfg)
 
 
 # Refresh budget after `scheduled_time` for the new bookable date to appear.
@@ -242,6 +259,150 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
                 "Target date %s still not visible after %d refreshes (visible: %s); proceeding.",
                 target, _MAX_DATE_REFRESH_ATTEMPTS, visible,
             )
+
+
+# Budget for the fast in-place XHR poll path. Total wall-clock cap before
+# we give up and reload — kept tight because each poll is ~100 ms and the
+# real release is usually visible on the first or second poll.
+_XHR_POLL_BUDGET_MS = 1_500
+_XHR_POLL_INTERVAL_MS = 80
+_XHR_BUTTON_WAIT_MS = 1_500
+_XHR_BUTTON_WAIT_INTERVAL_MS = 50
+
+
+# JS payloads used by `_xhr_poll_until_target_date_released`. The page already
+# has a signed-axios instance (`commonMethods.emitAjax`) mounted on the
+# `reservationStepOne` Vue component — we reach into it from `page.evaluate`
+# rather than reproducing the timestamp/sign/app-key/cgAuthorization logic
+# ourselves.
+_JS_PROBE_VUE = r"""
+() => {
+  function find(c, d){ if (d > 8) return null;
+    if (c.$options && c.$options.name === 'reservationStepOne') return c;
+    for (const ch of c.$children || []) { const r = find(ch, d + 1); if (r) return r; }
+    return null; }
+  let root = null;
+  for (const el of document.querySelectorAll('*')) { if (el.__vue__) { root = el.__vue__; break; } }
+  while (root && root.$parent) root = root.$parent;
+  const c = find(root, 0);
+  if (!c || !c.commonMethods || !c.commonMethods.emitAjax) return { ok: false, reason: 'no_component' };
+  return { ok: true, venueSiteId: c.parCurrentSite && c.parCurrentSite.id };
+}
+"""
+
+_JS_POLL_DAY_INFO = r"""
+async ({ venueSiteId, searchDate }) => {
+  function find(c, d){ if (d > 8) return null;
+    if (c.$options && c.$options.name === 'reservationStepOne') return c;
+    for (const ch of c.$children || []) { const r = find(ch, d + 1); if (r) return r; }
+    return null; }
+  let root = null;
+  for (const el of document.querySelectorAll('*')) { if (el.__vue__) { root = el.__vue__; break; } }
+  while (root && root.$parent) root = root.$parent;
+  const c = find(root, 0);
+  if (!c || !c.commonMethods || !c.commonMethods.emitAjax) return { ok: false, reason: 'no_component' };
+  return await new Promise(res => {
+    let done = false; const fin = v => { if (!done) { done = true; res(v); } };
+    c.commonMethods.emitAjax({
+      path: '/api/reservation/day/info', type: 'GET',
+      data: { venueSiteId, searchDate }, notPopUp: true,
+      success: () => fin({ ok: true }),
+      error: (e) => fin({ ok: false, code: e && e.code }),
+    });
+    setTimeout(() => fin({ ok: false, reason: 'timeout' }), 2500);
+  });
+}
+"""
+
+_JS_REFRESH_VENUE_INFO = r"""
+async () => {
+  function find(c, d){ if (d > 8) return null;
+    if (c.$options && c.$options.name === 'reservationStepOne') return c;
+    for (const ch of c.$children || []) { const r = find(ch, d + 1); if (r) return r; }
+    return null; }
+  let root = null;
+  for (const el of document.querySelectorAll('*')) { if (el.__vue__) { root = el.__vue__; break; } }
+  while (root && root.$parent) root = root.$parent;
+  const c = find(root, 0);
+  if (!c || typeof c.getVenueInfo !== 'function') return { ok: false, reason: 'no_method' };
+  try { await c.getVenueInfo(); return { ok: true }; }
+  catch (e) { return { ok: false, reason: String(e).slice(0, 200) }; }
+}
+"""
+
+
+async def _xhr_poll_until_target_date_released(page, cfg: AppConfig) -> bool:
+    """Fast in-place path: poll `day/info` via the page's signed-axios until
+    the target date is released, then refresh `advanceReservationDays` so the
+    date row re-renders. Returns True on success, False to signal the caller
+    to fall back to the reload loop.
+
+    Why this beats `page.reload()`: a full reload re-downloads the JS bundle
+    and re-mounts Vue (~8 s under load); a signed XHR is ~100 ms. The
+    mechanism was verified on a live page; whether the server's 12:00 flip
+    is observable via in-place poll (not full reload) can only be confirmed
+    at a real release tick — hence the fallback.
+    """
+    import time as _time
+    target = (cfg.date or "").strip()
+    if len(target) != 8 or not target.isdigit():
+        return False
+    iso_date = f"{target[:4]}-{target[4:6]}-{target[6:8]}"
+
+    try:
+        probe = await page.evaluate(_JS_PROBE_VUE)
+    except Exception as e:
+        log.warning("Vue probe raised; falling back to reload. (%s)", e)
+        return False
+    if not probe.get("ok"):
+        log.info("Vue component not reachable for XHR poll (%s); falling back to reload.",
+                 probe.get("reason"))
+        return False
+    venue_site_id = probe.get("venueSiteId") or cfg.venue_id
+
+    deadline = _time.monotonic() + (_XHR_POLL_BUDGET_MS / 1000)
+    attempt = 0
+    while _time.monotonic() < deadline:
+        attempt += 1
+        with cfg.profiler.span(f"post_fire_xhr_poll[{attempt}]"):
+            try:
+                r = await page.evaluate(
+                    _JS_POLL_DAY_INFO,
+                    {"venueSiteId": venue_site_id, "searchDate": iso_date},
+                )
+            except Exception as e:
+                log.warning("XHR poll raised (%s); falling back to reload.", e)
+                return False
+        if r.get("ok"):
+            log.info("XHR poll: target date %s released (attempt %d).", iso_date, attempt)
+            with cfg.profiler.span("post_fire_xhr_refresh_venue"):
+                try:
+                    refresh = await page.evaluate(_JS_REFRESH_VENUE_INFO)
+                except Exception as e:
+                    log.warning("getVenueInfo() raised after poll success; fallback. (%s)", e)
+                    return False
+            if not refresh.get("ok"):
+                log.info("getVenueInfo() returned not-ok (%s); falling back to reload.",
+                         refresh.get("reason"))
+                return False
+            label = _format_target_date_label(cfg.date)
+            with cfg.profiler.span("post_fire_xhr_wait_button"):
+                if label is None:
+                    return True
+                end = _time.monotonic() + (_XHR_BUTTON_WAIT_MS / 1000)
+                while _time.monotonic() < end:
+                    visible = await _read_date_button_texts(page)
+                    if any(label in t for t in visible):
+                        log.info("Target date button %s visible after in-place refresh.", label)
+                        return True
+                    await asyncio.sleep(_XHR_BUTTON_WAIT_INTERVAL_MS / 1000)
+            log.info("Target date button %s never appeared after in-place refresh; fallback.",
+                     label)
+            return False
+        await asyncio.sleep(_XHR_POLL_INTERVAL_MS / 1000)
+    log.info("XHR poll exhausted %d ms budget without seeing release; falling back to reload.",
+             _XHR_POLL_BUDGET_MS)
+    return False
 
 
 def _print_result(out: BookingResult) -> None:
@@ -554,6 +715,9 @@ def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi
     cfg.login_method = user.login_method
     cfg.date = worker.date
     cfg.start_time_list = list(worker.active_start_time_list())
+    # Drives the post-fire stagger in `_wait_for_scheduled_time` so workers
+    # don't all hit the day_info XHR at the same instant.
+    cfg.worker_index = index
     # cfg.start_time / cfg.end_time are set by the runner before each attempt.
     if multi:
         cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"user_{user.name}")

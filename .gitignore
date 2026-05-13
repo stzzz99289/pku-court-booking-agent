@@ -32,5 +32,8 @@ Thumbs.db
 # data
 data/
 
+# post-submit diagnostic dumps
+debugging/
+
 # claude info
 .claude/

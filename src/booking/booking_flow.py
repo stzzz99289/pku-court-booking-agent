@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+from datetime import datetime
+from pathlib import Path
 
 from playwright.async_api import Page
 
@@ -10,6 +13,83 @@ from .config import AppConfig
 from .result import BookingResult
 
 log = logging.getLogger(__name__)
+
+
+_DEBUG_DUMP_DIR = Path("debugging")
+
+
+# JS that lists every visible modal-/dialog-like element on the page. Used by
+# `_dump_post_submit_diagnostics` to capture what was on screen at the moment
+# the post-submit flow bailed out — so the *next* recurrence of an unhandled
+# dialog leaves enough evidence to write a matcher without guessing.
+_VISIBLE_MODALS_JS = r"""
+() => {
+  const sels = ['.ivu-modal-wrap', '.ivu-modal', '.el-message-box', '.verifybox',
+                '[class*="modal"]', '[class*="dialog"]', '[class*="message"]', '[role="dialog"]'];
+  const seen = new Set();
+  const out = [];
+  for (const sel of sels) {
+    for (const el of document.querySelectorAll(sel)) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const visible = r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden';
+      if (!visible) continue;
+      if (el.classList.contains('ivu-modal-hidden')) continue;
+      out.push({
+        sel,
+        cls: (el.className && el.className.toString()).slice(0, 300),
+        text: (el.innerText || '').replace(/\s+/g, ' ').slice(0, 500),
+        rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+      });
+    }
+  }
+  return out;
+}
+"""
+
+
+async def _dump_post_submit_diagnostics(page: Page, label: str) -> Path | None:
+    """Capture screenshot + body HTML + visible-modal summary to ./debugging/.
+
+    Called from the post-submit bail-out paths so the *next* unhandled
+    dialog leaves enough evidence to write a matcher. Best-effort: any
+    failure here is logged and swallowed (we never want to mask the
+    underlying booking failure).
+    """
+    try:
+        _DEBUG_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)[:60]
+        base = _DEBUG_DUMP_DIR / f"{stamp}_{safe_label}"
+        try:
+            await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+        except Exception as e:
+            log.warning("Diagnostic screenshot failed: %s", e)
+        try:
+            html = await page.content()
+            base.with_suffix(".html").write_text(html, encoding="utf-8")
+        except Exception as e:
+            log.warning("Diagnostic HTML dump failed: %s", e)
+        try:
+            modals = await page.evaluate(_VISIBLE_MODALS_JS)
+        except Exception as e:
+            modals = [{"error": f"evaluate failed: {e}"}]
+        meta = {
+            "timestamp": stamp,
+            "label": label,
+            "url": page.url,
+            "visible_modals": modals,
+        }
+        base.with_suffix(".json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        log.warning("Post-submit diagnostic dump saved to %s.{png,html,json}", base)
+        return base
+    except Exception as e:
+        log.warning("Failed to write post-submit diagnostic dump: %s", e)
+        return None
 
 
 def _sel(cfg: AppConfig, name: str) -> str:
@@ -598,10 +678,26 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
 
         # Screenshot the captcha image. The image element appears a beat after
         # .verifybox becomes visible, so give it a short window to attach.
+        # Then gate on the image actually being decoded — without this,
+        # Playwright's screenshot blocks waiting for paint (0.28s fast path
+        # vs ~3s slow path), so we explicitly wait for the `load` event.
         img_loc = page.locator(".verify-img-panel img").first
         try:
             with cfg.profiler.span(f"captcha_screenshot[{attempt + 1}]"):
                 await img_loc.wait_for(state="visible", timeout=3_000)
+                try:
+                    await img_loc.evaluate(
+                        "el => new Promise((resolve, reject) => {"
+                        "  if (el.complete && el.naturalWidth > 0) return resolve();"
+                        "  const ok = () => resolve();"
+                        "  const bad = () => reject(new Error('image error'));"
+                        "  el.addEventListener('load', ok, {once: true});"
+                        "  el.addEventListener('error', bad, {once: true});"
+                        "  setTimeout(() => reject(new Error('image load timeout')), 2500);"
+                        "})"
+                    )
+                except Exception as e:
+                    log.warning("Captcha image not fully loaded before screenshot: %s", e)
                 png = await img_loc.screenshot()
         except Exception:
             return BookingResult(False, "Booking captcha dialog visible but image element not found.", {})
@@ -661,6 +757,7 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         log.warning("Click-captcha still visible after attempt %d/%d, retrying.",
                     attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
 
+    await _dump_post_submit_diagnostics(page, "captcha_exhausted")
     return BookingResult(False, f"Failed to solve click-captcha after {_BOOKING_CAPTCHA_MAX_RETRIES} attempts.", {})
 
 
@@ -702,6 +799,7 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
             await asyncio.sleep(0.05)
         else:
             log.warning("Neither payment URL nor error modal appeared within the timeout.")
+            await _dump_post_submit_diagnostics(page, "no_trade_page")
 
     # If the payment page opened in a new tab, switch to it and close the old
     # reservation tab so only one window is left when the program ends.

@@ -113,6 +113,13 @@ class AppConfig:
     # wall-clock second; a tiny offset (default 500 ms) dramatically improves
     # first-refresh hit rate while still beating other clients to the slot.
     scheduled_fire_offset_ms: int = 500
+    # Per-worker post-fire stagger in milliseconds. After the fire instant, each
+    # worker sleeps `worker_index * worker_stagger_ms` before hitting the
+    # post-fire refresh, so workers don't all race the same throttled
+    # `day_info` XHR simultaneously. 0 disables the stagger. Worker index is
+    # set by the scheduler before running each worker.
+    worker_stagger_ms: int = 150
+    worker_index: int = 0
     # Populated from the worker's referenced user; set by runner before the booking flow starts.
     account: str = ""
     password: str = ""
@@ -225,6 +232,7 @@ def load_split_config(
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
         scheduled_fire_offset_ms=int(raw.get("scheduled_fire_offset_ms", 500)),
+        worker_stagger_ms=int(raw.get("worker_stagger_ms", 150)),
         profile=profile_flag,
         profiler=Profiler(enabled=profile_flag),
         users=users_list,
@@ -262,6 +270,7 @@ def load_config(user_config_path: Path, site_config_path: Path) -> AppConfig:
         scheduled_window_minutes=int(raw.get("scheduled_window_minutes", 3)),
         scheduled_prep_seconds=int(raw.get("scheduled_prep_seconds", 90)),
         scheduled_fire_offset_ms=int(raw.get("scheduled_fire_offset_ms", 500)),
+        worker_stagger_ms=int(raw.get("worker_stagger_ms", 150)),
         profile=profile_flag,
         profiler=Profiler(enabled=profile_flag),
         users=users,
