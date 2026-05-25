@@ -577,7 +577,7 @@ async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
                 await asyncio.sleep(0.05)
 
 
-_BOOKING_CAPTCHA_MAX_RETRIES = 3
+_BOOKING_CAPTCHA_MAX_RETRIES = 6
 
 # JS helper: walks every .ivu-modal-wrap, skips hidden ones, and returns the
 # rejection reason from the first visible '系统提示' modal. On this site the
@@ -662,6 +662,7 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
     but detaches its parent — Playwright still reports it as visible.
     """
     ctx = page.context
+    consecutive_solver_errors = 0  # A2b: refresh captcha after 3 in a row
     for attempt in range(_BOOKING_CAPTCHA_MAX_RETRIES):
         # Trade page may already exist (e.g. instant acceptance before we check).
         if _find_trade_page(ctx) is not None:
@@ -700,7 +701,17 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                     log.warning("Captcha image not fully loaded before screenshot: %s", e)
                 png = await img_loc.screenshot()
         except Exception:
-            return BookingResult(False, "Booking captcha dialog visible but image element not found.", {})
+            # A2a: image didn't mount within 3 s. Don't give up — refresh the
+            # captcha and retry on the next attempt; the post-failure screenshot
+            # on 2026-05-23 proved the image does render eventually.
+            log.warning("Captcha image not visible within 3 s on attempt %d/%d — refreshing and retrying.",
+                        attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
+            try:
+                await page.locator(".verify-refresh").first.click(timeout=1_000)
+            except Exception as refresh_err:
+                log.warning("Could not click .verify-refresh: %s", refresh_err)
+            await asyncio.sleep(0.5)
+            continue
 
         # Extract instruction chars from "请依次点击【转,线,导】" (or 【转线导】).
         label = ""
@@ -727,11 +738,22 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         try:
             with cfg.profiler.span(f"captcha_solve_api[{attempt + 1}]"):
                 coords = await click_solver.solve_click(png, instruction)
+            consecutive_solver_errors = 0
         except Exception as e:
             # Transient API errors (e.g. -3002 系统超时, network blips) — burn this
             # attempt and try again on the next iteration with a fresh screenshot.
             log.warning("Chaojiying solve_click failed on attempt %d/%d: %s",
                         attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES, e)
+            consecutive_solver_errors += 1
+            # A2b: after 3 consecutive solver-API errors, the current captcha image
+            # may be poisoning the API; refresh it before the next attempt.
+            if consecutive_solver_errors >= 3:
+                log.warning("3 consecutive solver-API errors — refreshing captcha.")
+                try:
+                    await page.locator(".verify-refresh").first.click(timeout=1_000)
+                except Exception as refresh_err:
+                    log.warning("Could not click .verify-refresh: %s", refresh_err)
+                consecutive_solver_errors = 0
             await asyncio.sleep(1.0)
             continue
         dpr = await page.evaluate("window.devicePixelRatio") or 1
@@ -799,7 +821,12 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
             await asyncio.sleep(0.05)
         else:
             log.warning("Neither payment URL nor error modal appeared within the timeout.")
-            await _dump_post_submit_diagnostics(page, "no_trade_page")
+            return page, BookingResult(
+                False,
+                "Booking silently rejected: captcha passed but no payment tab opened "
+                "and no error modal appeared (slot likely taken concurrently).",
+                {"url": page.url},
+            )
 
     # If the payment page opened in a new tab, switch to it and close the old
     # reservation tab so only one window is left when the program ends.

@@ -9,10 +9,35 @@ rows whose 支付状态 (pay_status) is "已支付".
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlparse
+
+# Transient navigation errors that warrant one retry (mirror of runner.py's set).
+_GOTO_TRANSIENT_PATTERNS = (
+    "net::ERR_ABORTED",
+    "net::ERR_NETWORK_CHANGED",
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_CONNECTION_CLOSED",
+    "net::ERR_CONNECTION_REFUSED",
+    "net::ERR_NAME_NOT_RESOLVED",
+)
+
+
+async def _goto_with_retry(page, url: str, *, wait_until: str = "domcontentloaded") -> None:
+    """page.goto wrapper that retries once on transient network errors."""
+    try:
+        await page.goto(url, wait_until=wait_until)
+        return
+    except Exception as e:
+        if not any(p in str(e) for p in _GOTO_TRANSIENT_PATTERNS):
+            raise
+        logging.getLogger(__name__).warning(
+            "goto %s failed (%s); retrying once after 500ms.", url, e)
+    await asyncio.sleep(0.5)
+    await page.goto(url, wait_until=wait_until)
 
 from playwright.async_api import Page
 
@@ -101,11 +126,11 @@ async def fetch_user_orders(cfg: AppConfig, user: UserConfig, limit: int) -> lis
     context, _ = await launch_persistent_context(cfg)
     page = context.pages[0] if context.pages else await context.new_page()
     try:
-        await page.goto(cfg.base_url, wait_until="domcontentloaded")
+        await _goto_with_retry(page, cfg.base_url)
         await ensure_logged_in(page, cfg, solver)
         url = _orders_url(cfg)
         log.info("Navigating to orders page: %s", url)
-        await page.goto(url, wait_until="domcontentloaded")
+        await _goto_with_retry(page, url)
         # If the saved-session heuristic was wrong, the orders page raises a
         # "please login" modal; dismiss it, do a real login, and retry.
         modal = page.get_by_text("请登录后访问", exact=True)
@@ -114,7 +139,7 @@ async def fetch_user_orders(cfg: AppConfig, user: UserConfig, limit: int) -> lis
             log.info("[%s] 'Please login' modal detected — re-authenticating.", user.name)
             await page.get_by_role("button", name="确定").first.click()
             await ensure_logged_in(page, cfg, solver)
-            await page.goto(url, wait_until="domcontentloaded")
+            await _goto_with_retry(page, url)
         except Exception:
             pass
         # Wait for the table body to render at least one row (or stay empty).

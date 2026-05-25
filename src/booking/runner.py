@@ -34,6 +34,32 @@ def _reservation_url(cfg: AppConfig) -> str:
     return f"{parsed.scheme}://{parsed.netloc}/venue/venue-reservation/{cfg.venue_id}"
 
 
+# Transient navigation errors that warrant one retry (observed 2026-05-24:
+# net::ERR_ABORTED on the initial venue/home goto).
+_GOTO_TRANSIENT_PATTERNS = (
+    "net::ERR_ABORTED",
+    "net::ERR_NETWORK_CHANGED",
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_CONNECTION_CLOSED",
+    "net::ERR_CONNECTION_REFUSED",
+    "net::ERR_NAME_NOT_RESOLVED",
+)
+
+
+async def _goto_with_retry(page, url: str, *, wait_until: str = "domcontentloaded") -> None:
+    """page.goto wrapper that retries once on transient network errors."""
+    try:
+        await page.goto(url, wait_until=wait_until)
+        return
+    except Exception as e:
+        msg = str(e)
+        if not any(p in msg for p in _GOTO_TRANSIENT_PATTERNS):
+            raise
+        log.warning("goto %s failed with transient error (%s); retrying once after 500ms.", url, msg)
+    await asyncio.sleep(0.5)
+    await page.goto(url, wait_until=wait_until)
+
+
 def _make_solvers(cfg: AppConfig):
     """Create the login and booking captcha solvers based on debug mode.
 
@@ -57,7 +83,7 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     """
     url = _reservation_url(cfg)
     log.info("Navigating to venue reservation: %s", url)
-    await page.goto(url, wait_until="domcontentloaded")
+    await _goto_with_retry(page, url)
     log.info("Landed on: %s", page.url)
 
     # Detect and dismiss the "please login" modal (appears quickly if session is invalid).
@@ -71,7 +97,7 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     await page.get_by_role("button", name="确定").first.click()
     await ensure_logged_in(page, cfg, login_solver)
     log.info("Re-navigating to venue reservation after login.")
-    await page.goto(url, wait_until="domcontentloaded")
+    await _goto_with_retry(page, url)
     log.info("Landed on: %s", page.url)
     await _ensure_date_buttons_visible(page)
 
@@ -163,6 +189,21 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
 
     target = _parse_scheduled_time(cfg.scheduled_time)
     remaining = (target - datetime.now()).total_seconds()
+    # C2: pre-warm the session by sending one lightweight signed XHR a few
+    # seconds before fire. The browser keeps cookies alive while the page sits
+    # open, but for ~90 s prep windows + occasional cookie-renewal triggers,
+    # a touch right before fire prevents the post-fire flow from racing a
+    # cookie refresh. Best-effort — failures just log and continue.
+    prewarm_offset = min(10, max(1, cfg.scheduled_prep_seconds // 2))
+    if remaining > prewarm_offset + 0.5:
+        sleep_until_prewarm = remaining - prewarm_offset
+        log.info(
+            "Scheduled mode: sleeping %.1f s until pre-warm (%.1f s pre-fire) …",
+            sleep_until_prewarm, prewarm_offset,
+        )
+        await asyncio.sleep(sleep_until_prewarm)
+        await _session_prewarm(page, cfg)
+        remaining = (target - datetime.now()).total_seconds()
     if remaining > 0:
         log.info(
             "Scheduled mode: waiting %.1f s until %s …",
@@ -183,17 +224,14 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
         log.info("Worker %d: applying %dms post-fire stagger.", cfg.worker_index, stagger_ms)
         await asyncio.sleep(stagger_ms / 1000)
     log.info("Scheduled time reached — refreshing page.")
+    # Reload-until-visible is the post-fire path. The earlier in-place
+    # signed-XHR fast-path was reverted on 2026-05-25 — at fire time the
+    # in-page axios session is stuck behind the same connection congestion
+    # that slows the server itself, so a fresh page reload (new socket /
+    # backend) is intrinsically faster than polling in place. See the B1
+    # diag trace in `debugging/b1_scheduled_20260525_120025_w0.json`.
     with cfg.profiler.span("post_fire_refresh"):
-        # Try fast in-place XHR poll first; if it can't confirm the target
-        # date within its budget (or the Vue handle isn't reachable), fall
-        # back to the legacy reload loop. Whether the in-place path actually
-        # observes the 12:00 release without a full reload can only be
-        # verified at a real fire — the profile distinguishes the two
-        # branches via `post_fire_reload_fallback`.
-        fast = await _xhr_poll_until_target_date_released(page, cfg)
-        if not fast:
-            with cfg.profiler.span("post_fire_reload_fallback"):
-                await _refresh_until_target_date_visible(page, cfg)
+        await _refresh_until_target_date_visible(page, cfg)
 
 
 # Refresh budget after `scheduled_time` for the new bookable date to appear.
@@ -227,15 +265,23 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
     """
     target = _format_target_date_label(cfg.date)
     for attempt in range(1, _MAX_DATE_REFRESH_ATTEMPTS + 1):
-        async with page.expect_response(
-            lambda r: "reservation/day/info" in r.url, timeout=15_000
-        ) as resp_info:
-            await page.reload(wait_until="domcontentloaded")
+        # Either the reload itself or the response-wait can raise PlaywrightTimeoutError
+        # at the 15 s ceiling under load (observed 2026-05-18, all workers crashed).
+        # Treat that as "couldn't capture day_info this round" and fall through to
+        # the date-button check; the loop will retry up to _MAX_DATE_REFRESH_ATTEMPTS.
         try:
-            await resp_info.value
-        except Exception:
-            log.warning("Did not capture reservation/day/info response after reload (attempt %d/%d).",
-                        attempt, _MAX_DATE_REFRESH_ATTEMPTS)
+            async with page.expect_response(
+                lambda r: "reservation/day/info" in r.url, timeout=15_000
+            ) as resp_info:
+                await page.reload(wait_until="domcontentloaded")
+            try:
+                await resp_info.value
+            except Exception:
+                log.warning("Did not capture reservation/day/info response after reload (attempt %d/%d).",
+                            attempt, _MAX_DATE_REFRESH_ATTEMPTS)
+        except Exception as e:
+            log.warning("Reload + response-wait failed on attempt %d/%d (%s); continuing.",
+                        attempt, _MAX_DATE_REFRESH_ATTEMPTS, e)
         await _ensure_date_buttons_visible(page)
 
         if target is None:
@@ -261,36 +307,11 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
             )
 
 
-# Budget for the fast in-place XHR poll path. Total wall-clock cap before
-# we give up and reload — kept tight because each poll is ~100 ms and the
-# real release is usually visible on the first or second poll.
-_XHR_POLL_BUDGET_MS = 1_500
-_XHR_POLL_INTERVAL_MS = 80
-_XHR_BUTTON_WAIT_MS = 1_500
-_XHR_BUTTON_WAIT_INTERVAL_MS = 50
-
-
-# JS payloads used by `_xhr_poll_until_target_date_released`. The page already
-# has a signed-axios instance (`commonMethods.emitAjax`) mounted on the
-# `reservationStepOne` Vue component — we reach into it from `page.evaluate`
-# rather than reproducing the timestamp/sign/app-key/cgAuthorization logic
-# ourselves.
-_JS_PROBE_VUE = r"""
-() => {
-  function find(c, d){ if (d > 8) return null;
-    if (c.$options && c.$options.name === 'reservationStepOne') return c;
-    for (const ch of c.$children || []) { const r = find(ch, d + 1); if (r) return r; }
-    return null; }
-  let root = null;
-  for (const el of document.querySelectorAll('*')) { if (el.__vue__) { root = el.__vue__; break; } }
-  while (root && root.$parent) root = root.$parent;
-  const c = find(root, 0);
-  if (!c || !c.commonMethods || !c.commonMethods.emitAjax) return { ok: false, reason: 'no_component' };
-  return { ok: true, venueSiteId: c.parCurrentSite && c.parCurrentSite.id };
-}
-"""
-
-_JS_POLL_DAY_INFO = r"""
+# Lightweight in-place signed XHR — used only by `_session_prewarm` to keep
+# cookies fresh during the pre-fire idle window. Calls the page's existing
+# `commonMethods.emitAjax` on the `reservationStepOne` Vue component so the
+# request inherits the page's MD5 sign / timestamp / cgAuthorization headers.
+_JS_TOUCH_DAY_INFO = r"""
 async ({ venueSiteId, searchDate }) => {
   function find(c, d){ if (d > 8) return null;
     if (c.$options && c.$options.name === 'reservationStepOne') return c;
@@ -309,100 +330,28 @@ async ({ venueSiteId, searchDate }) => {
       success: () => fin({ ok: true }),
       error: (e) => fin({ ok: false, code: e && e.code }),
     });
-    setTimeout(() => fin({ ok: false, reason: 'timeout' }), 2500);
+    setTimeout(() => fin({ ok: false, reason: 'timeout' }), 2000);
   });
 }
 """
 
-_JS_REFRESH_VENUE_INFO = r"""
-async () => {
-  function find(c, d){ if (d > 8) return null;
-    if (c.$options && c.$options.name === 'reservationStepOne') return c;
-    for (const ch of c.$children || []) { const r = find(ch, d + 1); if (r) return r; }
-    return null; }
-  let root = null;
-  for (const el of document.querySelectorAll('*')) { if (el.__vue__) { root = el.__vue__; break; } }
-  while (root && root.$parent) root = root.$parent;
-  const c = find(root, 0);
-  if (!c || typeof c.getVenueInfo !== 'function') return { ok: false, reason: 'no_method' };
-  try { await c.getVenueInfo(); return { ok: true }; }
-  catch (e) { return { ok: false, reason: String(e).slice(0, 200) }; }
-}
-"""
 
+async def _session_prewarm(page, cfg: AppConfig) -> None:
+    """Touch a lightweight signed XHR to keep cookies/session warm right before fire.
 
-async def _xhr_poll_until_target_date_released(page, cfg: AppConfig) -> bool:
-    """Fast in-place path: poll `day/info` via the page's signed-axios until
-    the target date is released, then refresh `advanceReservationDays` so the
-    date row re-renders. Returns True on success, False to signal the caller
-    to fall back to the reload loop.
-
-    Why this beats `page.reload()`: a full reload re-downloads the JS bundle
-    and re-mounts Vue (~8 s under load); a signed XHR is ~100 ms. The
-    mechanism was verified on a live page; whether the server's 12:00 flip
-    is observable via in-place poll (not full reload) can only be confirmed
-    at a real release tick — hence the fallback.
+    Best-effort — any failure is logged and ignored because the post-fire flow
+    will surface real session issues on its own.
     """
-    import time as _time
-    target = (cfg.date or "").strip()
-    if len(target) != 8 or not target.isdigit():
-        return False
-    iso_date = f"{target[:4]}-{target[4:6]}-{target[6:8]}"
-
+    today_iso = datetime.now().strftime("%Y-%m-%d")
     try:
-        probe = await page.evaluate(_JS_PROBE_VUE)
+        with cfg.profiler.span("session_prewarm"):
+            r = await page.evaluate(
+                _JS_TOUCH_DAY_INFO,
+                {"venueSiteId": cfg.venue_id, "searchDate": today_iso},
+            )
+        log.info("Session pre-warm: ok=%s (today=%s)", r.get("ok"), today_iso)
     except Exception as e:
-        log.warning("Vue probe raised; falling back to reload. (%s)", e)
-        return False
-    if not probe.get("ok"):
-        log.info("Vue component not reachable for XHR poll (%s); falling back to reload.",
-                 probe.get("reason"))
-        return False
-    venue_site_id = probe.get("venueSiteId") or cfg.venue_id
-
-    deadline = _time.monotonic() + (_XHR_POLL_BUDGET_MS / 1000)
-    attempt = 0
-    while _time.monotonic() < deadline:
-        attempt += 1
-        with cfg.profiler.span(f"post_fire_xhr_poll[{attempt}]"):
-            try:
-                r = await page.evaluate(
-                    _JS_POLL_DAY_INFO,
-                    {"venueSiteId": venue_site_id, "searchDate": iso_date},
-                )
-            except Exception as e:
-                log.warning("XHR poll raised (%s); falling back to reload.", e)
-                return False
-        if r.get("ok"):
-            log.info("XHR poll: target date %s released (attempt %d).", iso_date, attempt)
-            with cfg.profiler.span("post_fire_xhr_refresh_venue"):
-                try:
-                    refresh = await page.evaluate(_JS_REFRESH_VENUE_INFO)
-                except Exception as e:
-                    log.warning("getVenueInfo() raised after poll success; fallback. (%s)", e)
-                    return False
-            if not refresh.get("ok"):
-                log.info("getVenueInfo() returned not-ok (%s); falling back to reload.",
-                         refresh.get("reason"))
-                return False
-            label = _format_target_date_label(cfg.date)
-            with cfg.profiler.span("post_fire_xhr_wait_button"):
-                if label is None:
-                    return True
-                end = _time.monotonic() + (_XHR_BUTTON_WAIT_MS / 1000)
-                while _time.monotonic() < end:
-                    visible = await _read_date_button_texts(page)
-                    if any(label in t for t in visible):
-                        log.info("Target date button %s visible after in-place refresh.", label)
-                        return True
-                    await asyncio.sleep(_XHR_BUTTON_WAIT_INTERVAL_MS / 1000)
-            log.info("Target date button %s never appeared after in-place refresh; fallback.",
-                     label)
-            return False
-        await asyncio.sleep(_XHR_POLL_INTERVAL_MS / 1000)
-    log.info("XHR poll exhausted %d ms budget without seeing release; falling back to reload.",
-             _XHR_POLL_BUDGET_MS)
-    return False
+        log.warning("Session pre-warm raised (%s); continuing.", e)
 
 
 def _print_result(out: BookingResult) -> None:
@@ -599,7 +548,7 @@ async def run(
     page = context.pages[0] if context.pages else await context.new_page()
     out: BookingResult | None = None
     try:
-        await page.goto(cfg.base_url, wait_until="domcontentloaded")
+        await _goto_with_retry(page, cfg.base_url)
 
         # Stage 1: login (stop with hint if selectors not configured).
         if not login_automation_ready(cfg):
