@@ -106,6 +106,20 @@ def _sel(cfg: AppConfig, name: str) -> str:
 # free".
 _FREE_STATUS = 1
 
+# Hard-coded court preference: try the 2nd and 3rd courts (0-based index 1, 2)
+# first, then fall back to the 1st court (index 0), then the rest in order.
+# Order of preference: 1, 2, 0, 3, 4, 5, ...
+_COURT_PRIORITY_RANK = {1: 0, 2: 1, 0: 2}
+
+
+def prioritize_courts(court_indices: list[int]) -> list[int]:
+    """Reorder free court indices by the hard-coded preference (1, 2, 0, 3, 4, ...).
+
+    Courts 1 and 2 (the 2nd and 3rd courts) are preferred, then court 0, then
+    any remaining courts in ascending index order.
+    """
+    return sorted(court_indices, key=lambda c: _COURT_PRIORITY_RANK.get(c, c))
+
 
 def parse_day_info(payload: dict) -> dict[int, list[int]]:
     """Parse a `reservation/day/info` JSON body into {hour: [free_court_idx, ...]}.
@@ -331,12 +345,19 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
         log.warning("target_court_index=%d out of range (have %d court rows); falling back to row walk.",
                     cfg.target_court_index, len(court_row_indices))
 
+    # Collect every free court (court_idx is 0-based in court-row order, matching
+    # parse_day_info), then pick by the hard-coded court preference rather than
+    # plain row order so courts 1 & 2 are tried before court 0.
+    free_courts: list[tuple[int, object, str]] = []  # (court_idx, target_cell, label)
+    court_idx = 0
     for row_i in range(await court_rows.count()):
         row = court_rows.nth(row_i)
         cells = row.locator("td")
         first_cell = (await cells.nth(0).inner_text()).strip()
         if not re.match(r"\d+号", first_cell):
             continue
+        this_court_idx = court_idx
+        court_idx += 1
         target_cell = cells.nth(col_idx)
         block = target_cell.locator(".reserveBlock").first
         if not await block.count():
@@ -344,8 +365,13 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
         block_classes = ((await block.get_attribute("class")) or "").split()
         if "free" not in block_classes:
             continue  # Sold (reserved) or mid-booking (reservation).
-        cell_text = (await target_cell.inner_text()).strip()
-        log.info("Clicking court %s at %s (status: %s)", first_cell, target_time, cell_text)
+        free_courts.append((this_court_idx, target_cell, first_cell))
+
+    if free_courts:
+        order = {c: i for i, c in enumerate(prioritize_courts([c for c, _, _ in free_courts]))}
+        free_courts.sort(key=lambda fc: order[fc[0]])
+        _, target_cell, label = free_courts[0]
+        log.info("Clicking court %s at %s (court_idx=%d, priority pick).", label, target_time, free_courts[0][0])
         await target_cell.click()
         return None
 

@@ -13,6 +13,7 @@ from .booking_flow import (
     check_booking_rejection,
     confirm_payment,
     discover_hour_page_boundaries,
+    prioritize_courts,
     select_booking_date,
     select_court_time,
     solve_booking_captcha,
@@ -427,7 +428,7 @@ async def _attempt_book_from_priority_list(
         cache_pick = None
         for hour in cfg.start_time_list:
             tried.append(hour)
-            free_courts = cache.get(int(hour)) or []
+            free_courts = prioritize_courts(cache.get(int(hour)) or [])
             if free_courts:
                 cache_pick = (hour, free_courts[0])
                 break
