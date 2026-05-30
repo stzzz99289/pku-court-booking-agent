@@ -93,18 +93,54 @@ rsync -avz tianze@43.173.124.100:~/pku-court-booking-agent/data/profiles/ \
 Then re-run `python scripts/profile_stats.py data/profiles --md` for
 combined local+server stats.
 
-## Updating code on the server
+## Updating code on the server (pull + restart)
+
+This is the standard "deploy the latest code" flow. Push your commits to
+`origin/main` locally first, then on the server:
+
+**1. Pull the latest code:**
 
 ```bash
 ssh tianze@43.173.124.100 'cd ~/pku-court-booking-agent && git pull'
-ssh tianze@43.173.124.100 '~/pku-court-booking-agent/scripts/webapp.sh restart'
 ```
 
-If `requirements.txt` changed:
+**2. (Only if `requirements.txt` changed) reinstall deps:**
 
 ```bash
 ssh tianze@43.173.124.100 'cd ~/pku-court-booking-agent && .venv/bin/pip install -r requirements.txt'
+# and if a new Playwright version is pulled in:
+ssh tianze@43.173.124.100 'cd ~/pku-court-booking-agent && .venv/bin/python -m playwright install chromium'
 ```
+
+**3. (Optional but recommended) smoke-test the CLI before restarting.**
+Note: this books REAL courts using the server's `config/cli/user_config.yaml`
+(currently 2 workers: `stz` + `zy`), so each run holds 2 unpaid reservations
+that you must then pay or cancel from the orders page. Use sparingly.
+
+```bash
+ssh tianze@43.173.124.100 'cd ~/pku-court-booking-agent && \
+  timeout 280 .venv/bin/python main.py \
+  -c config/cli/user_config.yaml --site-config config/cli/site_config.yaml 2>&1 | tail -25'
+```
+
+A non-booking sanity check that does NOT burn reservations:
+
+```bash
+ssh tianze@43.173.124.100 'cd ~/pku-court-booking-agent && \
+  .venv/bin/python main.py --query-orders 3 2>&1 | tail -20'
+```
+
+**4. Restart the webapp and confirm it came back up:**
+
+```bash
+ssh tianze@43.173.124.100 '~/pku-court-booking-agent/scripts/webapp.sh restart && \
+  sleep 2 && ~/pku-court-booking-agent/scripts/webapp.sh status'
+# then verify the log shows "Application startup complete" + the next scheduler fire:
+ssh tianze@43.173.124.100 'tail -8 ~/pku-court-booking-agent/data/webapp.log'
+```
+
+A healthy restart logs `starting webapp in local mode on 0.0.0.0:18000`,
+`scheduler: next fire <date>`, and `Application startup complete`.
 
 ## Security note
 
