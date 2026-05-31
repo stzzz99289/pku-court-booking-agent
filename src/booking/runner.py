@@ -236,10 +236,22 @@ async def _wait_for_scheduled_time(page, cfg: AppConfig) -> None:
 
 
 # Refresh budget after `scheduled_time` for the new bookable date to appear.
-# Total worst-case wait at the boundary ≈ N * (reload + delay), kept tight
-# so a real "date never available" config error still surfaces quickly.
+#
+# At 12:00:00 the server is under a login/booking stampede, so each round hits
+# two congested round-trips: the page navigation (HTML) and the `day/info` XHR
+# carrying slot data. We cap them SEPARATELY (see `_refresh_until_target_date_visible`):
+#   - navigation (reload) capped tight — if the server can't even hand back the
+#     page HTML quickly, the socket is jammed; abandon and retry on a fresh one.
+#   - `day/info` response capped generously — this is the real bottleneck, so we
+#     wait patiently for a normally-slow response, but not forever.
+# The two timers overlap (the response listener is armed before the reload runs
+# inside it), so per-attempt worst case ≈ max(reload_cap, response_cap), and the
+# stage worst case ≈ N * that. Tuned so a typical fire succeeds on attempt 1
+# (~10 s response) while the old 30 s-default reload hang (→ 81 s tail) is gone.
 _MAX_DATE_REFRESH_ATTEMPTS = 3
 _DATE_REFRESH_RETRY_DELAY_MS = 200
+_DATE_REFRESH_RELOAD_TIMEOUT_MS = 5_000   # cap the navigation (HTML) per attempt
+_DATE_REFRESH_RESPONSE_TIMEOUT_MS = 12_000  # patiently wait the congested day/info XHR
 
 
 def _format_target_date_label(date_str: str) -> str | None:
@@ -267,14 +279,20 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
     target = _format_target_date_label(cfg.date)
     for attempt in range(1, _MAX_DATE_REFRESH_ATTEMPTS + 1):
         # Either the reload itself or the response-wait can raise PlaywrightTimeoutError
-        # at the 15 s ceiling under load (observed 2026-05-18, all workers crashed).
-        # Treat that as "couldn't capture day_info this round" and fall through to
-        # the date-button check; the loop will retry up to _MAX_DATE_REFRESH_ATTEMPTS.
+        # under load (observed 2026-05-18, all workers crashed). Treat that as
+        # "couldn't capture day_info this round" and fall through to the date-button
+        # check; the loop will retry up to _MAX_DATE_REFRESH_ATTEMPTS. The reload gets
+        # an explicit timeout so a jammed navigation is abandoned at ~5 s instead of
+        # riding Playwright's 30 s default (the source of the 81 s tail).
         try:
             async with page.expect_response(
-                lambda r: "reservation/day/info" in r.url, timeout=15_000
+                lambda r: "reservation/day/info" in r.url,
+                timeout=_DATE_REFRESH_RESPONSE_TIMEOUT_MS,
             ) as resp_info:
-                await page.reload(wait_until="domcontentloaded")
+                await page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=_DATE_REFRESH_RELOAD_TIMEOUT_MS,
+                )
             try:
                 await resp_info.value
             except Exception:

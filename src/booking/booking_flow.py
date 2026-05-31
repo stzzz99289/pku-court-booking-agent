@@ -211,15 +211,23 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
                 return None
             log.info("Selecting date: %s", target)
             # Wait for the schedule API response before returning so the table is fresh.
+            # The date is already released here (post_fire_refresh loaded it), so the
+            # healthy day/info response is ~1 s; a 30 s span means the *click* hung on
+            # the default action timeout, not a slow response. Cap the click tight so a
+            # jammed click is abandoned at 3 s and we fall through to the DOM walk
+            # (empty cache below) instead of burning 30 s.
             with cfg.profiler.span("date_click_and_xhr"):
-                async with page.expect_response(
-                    lambda r: "reservation/day/info" in r.url, timeout=10_000
-                ) as resp_info:
-                    await btn.click()
                 try:
+                    async with page.expect_response(
+                        lambda r: "reservation/day/info" in r.url, timeout=8_000
+                    ) as resp_info:
+                        await btn.click(timeout=3_000)
                     resp = await resp_info.value
                 except Exception as e:
-                    log.warning("Did not capture reservation/day/info response (%s); proceeding without cache.", e)
+                    # Either the click hung (capped at 3 s) or the response never came;
+                    # both mean "no fresh cache this round" — fall through to the DOM
+                    # walk in select_court_time instead of crashing the worker.
+                    log.warning("Date click / day/info response failed (%s); proceeding without cache.", e)
                     cfg.cached_free_slots = {}
                     return None
             try:
