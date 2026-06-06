@@ -612,6 +612,14 @@ async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
 
 
 _BOOKING_CAPTCHA_MAX_RETRIES = 6
+# Cap each captcha-image click. Without an explicit timeout a click rides
+# Playwright's 30 s default action timeout, so if the image re-renders /
+# detaches under fire-time load the click hangs the full 30 s and kills the
+# worker (observed 2026-06-02: `Locator.click: Timeout 30000ms … waiting for
+# locator(".verify-img-panel img")`). Cap it tight and on timeout refresh the
+# captcha + retry instead of letting it bubble up — same fix pattern as the
+# capped date-click in select_booking_date.
+_CAPTCHA_CLICK_TIMEOUT_MS = 3_000
 
 # JS helper: walks every .ivu-modal-wrap, skips hidden ones, and returns the
 # rejection reason from the first visible '系统提示' modal. On this site the
@@ -792,10 +800,27 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             continue
         dpr = await page.evaluate("window.devicePixelRatio") or 1
         log.info("Click-captcha coords (attempt %d, dpr=%s): %s (chars: %s)", attempt + 1, dpr, coords, label)
-        with cfg.profiler.span(f"captcha_clicks[{attempt + 1}]"):
-            for x, y in coords:
-                await img_loc.click(position={"x": x / dpr, "y": y / dpr})
-                await asyncio.sleep(0.1)
+        try:
+            with cfg.profiler.span(f"captcha_clicks[{attempt + 1}]"):
+                for x, y in coords:
+                    await img_loc.click(
+                        position={"x": x / dpr, "y": y / dpr},
+                        timeout=_CAPTCHA_CLICK_TIMEOUT_MS,
+                    )
+                    await asyncio.sleep(0.1)
+        except Exception as e:
+            # The image re-rendered/detached under load and the click hung to its
+            # cap. Don't crash the worker — refresh the captcha and retry on the
+            # next attempt with a fresh image, rather than letting the 30 s-class
+            # timeout bubble up and kill the booking.
+            log.warning("Captcha-image click failed on attempt %d/%d (%s) — refreshing and retrying.",
+                        attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES, e)
+            try:
+                await page.locator(".verify-refresh").first.click(timeout=1_000)
+            except Exception as refresh_err:
+                log.warning("Could not click .verify-refresh: %s", refresh_err)
+            await asyncio.sleep(0.5)
+            continue
 
         # Poll for success conditions: trade page opened in a (new) tab, rejection
         # modal, or captcha genuinely dismissed. Tight interval so the payment
