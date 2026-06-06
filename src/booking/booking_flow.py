@@ -620,6 +620,13 @@ _BOOKING_CAPTCHA_MAX_RETRIES = 6
 # captcha + retry instead of letting it bubble up — same fix pattern as the
 # capped date-click in select_booking_date.
 _CAPTCHA_CLICK_TIMEOUT_MS = 3_000
+# A captcha is only solvable when BOTH its image and its instruction text are
+# present — the image gives the glyphs to click, the text says which ones. The
+# text (".verify-msg": "请依次点击【转,线,导】") can lag the image mount by a
+# beat under load, so poll for it briefly; if it never arrives the captcha is
+# half-rendered and we refresh + retry rather than aborting the worker.
+_CAPTCHA_MSG_TIMEOUT_MS = 2_000
+_CAPTCHA_MSG_POLL_MS = 200
 
 # JS helper: walks every .ivu-modal-wrap, skips hidden ones, and returns the
 # rejection reason from the first visible '系统提示' modal. On this site the
@@ -682,6 +689,28 @@ def _find_trade_page(context) -> Page | None:
         if "tradeNo=" in p.url:
             return p
     return None
+
+
+async def _read_captcha_instruction(page: Page) -> str:
+    """Poll `.verify-msg` for the click instruction and return its glyphs.
+
+    The instruction box ("请依次点击【转,线,导】") can mount a beat after the
+    captcha image, so poll up to `_CAPTCHA_MSG_TIMEOUT_MS` before concluding it
+    is missing. Returns the stripped glyph string (e.g. "转线导"), or "" if the
+    text never appears (half-rendered captcha). On the happy path the text is
+    already present on the first poll, so this adds no latency.
+    """
+    msg_loc = page.locator(".verify-msg").first
+    attempts = max(1, _CAPTCHA_MSG_TIMEOUT_MS // _CAPTCHA_MSG_POLL_MS)
+    for i in range(attempts):
+        if await msg_loc.count():
+            msg = (await msg_loc.inner_text()).strip()
+            m = re.search(r"【(.+?)】", msg)
+            if m:
+                return m.group(1).replace(",", "")
+        if i < attempts - 1:
+            await asyncio.sleep(_CAPTCHA_MSG_POLL_MS / 1000)
+    return ""
 
 
 async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> BookingResult | None:
@@ -756,21 +785,28 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             continue
 
         # Extract instruction chars from "请依次点击【转,线,导】" (or 【转线导】).
-        label = ""
-        msg_loc = page.locator(".verify-msg").first
-        if await msg_loc.count():
-            msg = (await msg_loc.inner_text()).strip()
-            m = re.search(r"【(.+?)】", msg)
-            if m:
-                label = m.group(1).replace(",", "")
+        # The image mounted above; now require the instruction text too — both
+        # must be present for a solvable captcha. Poll briefly since the text can
+        # lag the image.
+        label = await _read_captcha_instruction(page)
         if not label:
-            # The captcha may be mid-dismiss (verifybox visible but .verify-msg empty)
-            # because a rejection modal is opening on top — give it a moment and re-check.
-            await asyncio.sleep(0.8)
+            # Either the captcha is half-rendered (text never mounted) or it is
+            # mid-dismiss because a rejection modal is opening on top. If a real
+            # rejection modal is up, abort with its reason. Otherwise treat the
+            # missing text as "captcha not ready" and refresh + retry on the next
+            # attempt rather than killing the worker — mirrors the image-miss path
+            # above so the worker keeps its remaining chances.
             error_text = await _read_system_error_modal(page)
             if error_text:
                 return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
-            return BookingResult(False, "Booking captcha instruction text not found (.verify-msg).", {})
+            log.warning("Captcha instruction text (.verify-msg) not ready on attempt %d/%d — refreshing and retrying.",
+                        attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
+            try:
+                await page.locator(".verify-refresh").first.click(timeout=1_000)
+            except Exception as refresh_err:
+                log.warning("Could not click .verify-refresh: %s", refresh_err)
+            await asyncio.sleep(0.5)
+            continue
         if cfg.save_captcha:
             from .captcha import save_captcha_image
             save_captcha_image(png, "booking", label=label)
