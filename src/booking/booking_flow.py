@@ -788,7 +788,8 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
         # The image mounted above; now require the instruction text too — both
         # must be present for a solvable captcha. Poll briefly since the text can
         # lag the image.
-        label = await _read_captcha_instruction(page)
+        with cfg.profiler.span(f"captcha_msg_wait[{attempt + 1}]"):
+            label = await _read_captcha_instruction(page)
         if not label:
             # Either the captcha is half-rendered (text never mounted) or it is
             # mid-dismiss because a rejection modal is opening on top. If a real

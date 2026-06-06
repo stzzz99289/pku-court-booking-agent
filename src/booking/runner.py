@@ -596,7 +596,11 @@ async def run(
                     if refresh_attempt > 1:
                         log.info("Refresh #%d: re-checking start_time_list from the top.",
                                  refresh_attempt - 1)
-                        await _navigate_to_reservation(page, cfg, login_solver)
+                        # Distinct span from the first (pre-fire) navigate: this one
+                        # runs post-fire under contention after a slot was rejected,
+                        # so it's on the critical path and worth measuring separately.
+                        with cfg.profiler.span("renavigate_to_reservation"):
+                            await _navigate_to_reservation(page, cfg, login_solver)
 
                     page, result, chosen_hour = await _attempt_book_from_priority_list(
                         page, cfg, click_solver,
@@ -618,7 +622,8 @@ async def run(
                             "Transient failure (%s). Re-navigating (transient retry %d/%d).",
                             result.message, transient_attempts, _MAX_TRANSIENT_RETRIES,
                         )
-                        await _navigate_to_reservation(page, cfg, login_solver)
+                        with cfg.profiler.span("renavigate_to_reservation"):
+                            await _navigate_to_reservation(page, cfg, login_solver)
                         continue
 
                     # No hour in the list has any free court — every priority slot is
