@@ -627,6 +627,16 @@ _CAPTCHA_CLICK_TIMEOUT_MS = 3_000
 # half-rendered and we refresh + retry rather than aborting the worker.
 _CAPTCHA_MSG_TIMEOUT_MS = 2_000
 _CAPTCHA_MSG_POLL_MS = 200
+# How long to wait after clicking the captcha glyphs for an acceptance signal
+# (payment popup opened / rejection modal / captcha dismissed) before concluding
+# the solve was wrong and retrying. Bumped from the old 3 s because under
+# fire-time load the site can take >3 s to fire the payment-popup window.open;
+# the old 3 s window expired first, so we wrongly re-clicked an already-accepted
+# captcha and orphaned the popup.
+_CAPTCHA_OUTCOME_WAIT_MS = 5_000
+# Once a payment popup has opened, how long to wait for it to navigate to its
+# 'tradeNo=' trade URL. The popup can open blank and navigate a beat later.
+_PAYMENT_POPUP_NAV_WAIT_MS = 15_000
 
 # JS helper: walks every .ivu-modal-wrap, skips hidden ones, and returns the
 # rejection reason from the first visible '系统提示' modal. On this site the
@@ -685,10 +695,29 @@ def _find_trade_page(context) -> Page | None:
     reservation tab stays put), so we always scan the whole context rather
     than trusting the original `page.url`.
     """
-    for p in context.pages:
-        if "tradeNo=" in p.url:
-            return p
+    for p in list(context.pages):
+        try:
+            if "tradeNo=" in p.url:
+                return p
+        except Exception:
+            continue  # page closed mid-scan
     return None
+
+
+def _popups_since(context, baseline: int) -> list[Page]:
+    """Pages opened after the booking submit (count beyond `baseline`).
+
+    Captcha acceptance is signalled by the site firing `window.open` for the
+    payment page the instant the click-captcha is accepted. `baseline` is the
+    live page count captured before submit, so this returns only the payment
+    popup(s) for the current attempt and ignores any stale tab left over from an
+    earlier re-walk. Detecting the popup's mere existence (before it navigates to
+    its tradeNo URL) is the earliest 'accepted' signal we have — our old code
+    kept clicking the captcha during that gap, which orphaned the popup (booking
+    reserved server-side but the tab stuck blank, so it auto-cancelled unpaid).
+    """
+    pages = list(context.pages)
+    return pages[baseline:] if len(pages) > baseline else []
 
 
 async def _read_captcha_instruction(page: Page) -> str:
@@ -713,6 +742,35 @@ async def _read_captcha_instruction(page: Page) -> str:
     return ""
 
 
+async def _refresh_captcha(page: Page) -> bool:
+    """Click the captcha refresh control, returning True if the click landed.
+
+    A plain `.click()` times out at ~1 s under fire-time load because during the
+    panel transition `.verify-refresh` is briefly covered/unstable and fails
+    Playwright's actionability check — observed 2026-06-10, where EVERY refresh
+    timed out and the captcha never actually refreshed (the same instruction was
+    re-solved three times). So we escalate: normal click → force click → JS
+    dispatch. If all fail the caller still retries, just without a fresh image.
+    """
+    loc = page.locator(".verify-refresh").first
+    try:
+        await loc.click(timeout=1_000)
+        return True
+    except Exception:
+        pass
+    try:
+        await loc.click(timeout=1_000, force=True)
+        return True
+    except Exception:
+        pass
+    try:
+        await loc.dispatch_event("click")
+        return True
+    except Exception as e:
+        log.warning("Could not refresh captcha (.verify-refresh): %s", e)
+        return False
+
+
 async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> BookingResult | None:
     """Solve the click-captcha that appears after submitting a booking.
 
@@ -733,20 +791,37 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
     but detaches its parent — Playwright still reports it as visible.
     """
     ctx = page.context
+    verifybox = page.locator(".verifybox").first
+    # Page count before the booking submit's payment popup can appear. A new page
+    # beyond this baseline == the site fired window.open for the payment tab ==
+    # the captcha was accepted. This is the earliest, most reliable "accepted"
+    # signal (it fires before the popup even navigates to its tradeNo URL), so we
+    # use it to STOP touching the captcha instead of re-clicking an accepted one.
+    baseline_pages = len(ctx.pages)
+
+    async def _accepted() -> str | None:
+        """Return the name of whichever acceptance signal is present, else None."""
+        if _find_trade_page(ctx) is not None:
+            return "trade_page"
+        if _popups_since(ctx, baseline_pages):
+            return "payment_popup"
+        if not await verifybox.is_visible():
+            return "verifybox_dismissed"
+        return None
+
     consecutive_solver_errors = 0  # A2b: refresh captcha after 3 in a row
     for attempt in range(_BOOKING_CAPTCHA_MAX_RETRIES):
-        # Trade page may already exist (e.g. instant acceptance before we check).
-        if _find_trade_page(ctx) is not None:
+        # Already accepted (instant acceptance, or a prior attempt's clicks landed
+        # while we were mid-retry)? Stop here — re-clicking now orphans the popup.
+        signal = await _accepted()
+        if signal is not None:
+            log.info("Captcha accepted (%s) before attempt %d — proceeding to payment.", signal, attempt + 1)
             return None
 
         # A rejection modal may have already appeared before we get a chance to click.
         error_text = await _read_system_error_modal(page)
         if error_text:
             return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
-
-        verifybox = page.locator(".verifybox").first
-        if not await verifybox.is_visible():
-            return None  # Captcha already gone — success.
 
         # Screenshot the captcha image. The image element appears a beat after
         # .verifybox becomes visible, so give it a short window to attach.
@@ -775,12 +850,15 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             # A2a: image didn't mount within 3 s. Don't give up — refresh the
             # captcha and retry on the next attempt; the post-failure screenshot
             # on 2026-05-23 proved the image does render eventually.
+            # The image may not have mounted because the captcha was just accepted
+            # and is detaching — check before assuming a half-render.
+            signal = await _accepted()
+            if signal is not None:
+                log.info("Captcha accepted (%s) — image gone because the panel is dismissing.", signal)
+                return None
             log.warning("Captcha image not visible within 3 s on attempt %d/%d — refreshing and retrying.",
                         attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
-            try:
-                await page.locator(".verify-refresh").first.click(timeout=1_000)
-            except Exception as refresh_err:
-                log.warning("Could not click .verify-refresh: %s", refresh_err)
+            await _refresh_captcha(page)
             await asyncio.sleep(0.5)
             continue
 
@@ -800,12 +878,13 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             error_text = await _read_system_error_modal(page)
             if error_text:
                 return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
+            signal = await _accepted()
+            if signal is not None:
+                log.info("Captcha accepted (%s) — instruction text gone because the panel is dismissing.", signal)
+                return None
             log.warning("Captcha instruction text (.verify-msg) not ready on attempt %d/%d — refreshing and retrying.",
                         attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
-            try:
-                await page.locator(".verify-refresh").first.click(timeout=1_000)
-            except Exception as refresh_err:
-                log.warning("Could not click .verify-refresh: %s", refresh_err)
+            await _refresh_captcha(page)
             await asyncio.sleep(0.5)
             continue
         if cfg.save_captcha:
@@ -828,10 +907,7 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
             # may be poisoning the API; refresh it before the next attempt.
             if consecutive_solver_errors >= 3:
                 log.warning("3 consecutive solver-API errors — refreshing captcha.")
-                try:
-                    await page.locator(".verify-refresh").first.click(timeout=1_000)
-                except Exception as refresh_err:
-                    log.warning("Could not click .verify-refresh: %s", refresh_err)
+                await _refresh_captcha(page)
                 consecutive_solver_errors = 0
             await asyncio.sleep(1.0)
             continue
@@ -846,32 +922,36 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                     )
                     await asyncio.sleep(0.1)
         except Exception as e:
-            # The image re-rendered/detached under load and the click hung to its
-            # cap. Don't crash the worker — refresh the captcha and retry on the
-            # next attempt with a fresh image, rather than letting the 30 s-class
-            # timeout bubble up and kill the booking.
+            # The click hung to its cap. The most common cause under load is NOT a
+            # bad image — it's that the captcha was just accepted and the image is
+            # detaching, so the click can't land. Check acceptance first; only
+            # refresh + retry if the captcha is genuinely still up and stuck.
+            signal = await _accepted()
+            if signal is not None:
+                log.info("Captcha accepted (%s) — image-click 'timeout' was the panel dismissing.", signal)
+                return None
             log.warning("Captcha-image click failed on attempt %d/%d (%s) — refreshing and retrying.",
                         attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES, e)
-            try:
-                await page.locator(".verify-refresh").first.click(timeout=1_000)
-            except Exception as refresh_err:
-                log.warning("Could not click .verify-refresh: %s", refresh_err)
+            await _refresh_captcha(page)
             await asyncio.sleep(0.5)
             continue
 
-        # Poll for success conditions: trade page opened in a (new) tab, rejection
-        # modal, or captcha genuinely dismissed. Tight interval so the payment
-        # tab is claimed the moment it appears — total budget stays ~3 s.
+        # Poll for an acceptance signal: payment popup opened, trade page, or the
+        # captcha dismissed. Tight interval so the popup is detected the instant it
+        # appears. Budget bumped to ~5 s because under fire-time load the site can
+        # take >3 s to fire the payment-popup window.open — and once accepted we
+        # must NOT re-click, or we orphan that popup (the 2026-06-10 mass failure).
+        polls = max(1, _CAPTCHA_OUTCOME_WAIT_MS // 100)
         with cfg.profiler.span(f"captcha_wait_outcome[{attempt + 1}]"):
-            for _ in range(30):  # ~3 s at 0.1 s intervals.
+            for _ in range(polls):
                 await asyncio.sleep(0.1)
-                if _find_trade_page(ctx) is not None:
-                    return None  # Payment page appeared — booking accepted.
+                signal = await _accepted()
+                if signal is not None:
+                    log.info("Captcha accepted (%s) on attempt %d.", signal, attempt + 1)
+                    return None
                 error_text = await _read_system_error_modal(page)
                 if error_text:
                     return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
-                if not await verifybox.is_visible():
-                    return None  # Captcha dismissed — success.
         log.warning("Click-captcha still visible after attempt %d/%d, retrying.",
                     attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
 
@@ -899,14 +979,24 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
     """
     ctx = page.context
     trade_page: Page | None = None
+    popup_seen_at_ms: float | None = None  # when a (possibly-blank) popup first appeared
     # After captcha the SPA either opens a new tab with `?tradeNo=...` or pops
-    # a '系统提示' modal explaining the rejection. Poll tightly so the payment
-    # tab is claimed the moment it appears (total budget stays ~10 s).
+    # a '系统提示' modal explaining the rejection. The popup often opens BLANK and
+    # navigates to its tradeNo URL a beat later, so we wait patiently for any
+    # non-main page to reach the trade URL rather than only matching tradeNo on a
+    # tight poll. Budget bumped to ~15 s for slow fire-time navigation.
     with cfg.profiler.span("wait_for_trade_page"):
-        for _ in range(200):  # ~10 s at 0.05 s intervals.
+        polls = max(1, _PAYMENT_POPUP_NAV_WAIT_MS // 50)
+        for i in range(polls):
             trade_page = _find_trade_page(ctx)
             if trade_page is not None:
                 break
+            # A popup that opened but hasn't reached tradeNo yet — record when we
+            # first saw it so we can tell "blank/orphaned popup" from "no popup".
+            if popup_seen_at_ms is None and any(p is not page for p in ctx.pages):
+                popup_seen_at_ms = i * 50
+                log.info("Payment popup detected (blank) at ~%d ms; waiting for it to navigate to tradeNo.",
+                         int(popup_seen_at_ms))
             error_text = await _read_system_error_modal(page)
             if error_text:
                 return page, BookingResult(
@@ -916,12 +1006,31 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
                 )
             await asyncio.sleep(0.05)
         else:
-            log.warning("Neither payment URL nor error modal appeared within the timeout.")
+            # Diagnostics: dump every page URL so the next run tells us whether the
+            # popup opened-but-blank (orphaned navigation) or never opened at all.
+            page_urls = []
+            for p in list(ctx.pages):
+                try:
+                    page_urls.append(p.url)
+                except Exception:
+                    page_urls.append("<closed>")
+            had_blank_popup = popup_seen_at_ms is not None
+            log.warning(
+                "Neither payment URL nor error modal appeared within %.0f s. "
+                "pages=%d urls=%s blank_popup_seen=%s",
+                _PAYMENT_POPUP_NAV_WAIT_MS / 1000, len(page_urls), page_urls, had_blank_popup,
+            )
+            await _dump_post_submit_diagnostics(page, "no_payment_tab")
+            reason = (
+                "Booking reserved but payment tab opened blank and never reached the "
+                "trade URL (popup orphaned)." if had_blank_popup else
+                "captcha passed but no payment tab opened and no error modal appeared "
+                "(slot likely taken concurrently)."
+            )
             return page, BookingResult(
                 False,
-                "Booking silently rejected: captcha passed but no payment tab opened "
-                "and no error modal appeared (slot likely taken concurrently).",
-                {"url": page.url},
+                f"Booking silently rejected: {reason}",
+                {"url": page.url, "pages": page_urls, "blank_popup": had_blank_popup},
             )
 
     # If the payment page opened in a new tab, switch to it and close the old

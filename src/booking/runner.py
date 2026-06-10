@@ -391,6 +391,17 @@ def _is_site_rejection(result: BookingResult) -> bool:
     return not result.success and result.message.startswith(_REJECTION_PREFIX)
 
 
+# Site-side captcha rate-limit. After a few rapid captcha submits the server
+# throttles the whole account ("验证码次数超出限制，请稍后再操作！"); re-walking and
+# re-submitting only deepens the throttle, so this is terminal, not a retry.
+_CAPTCHA_RATE_LIMIT_TEXT = "验证码次数超出限制"
+
+
+def _is_captcha_rate_limited(result: BookingResult) -> bool:
+    """True if the rejection is the site's captcha rate-limit throttle."""
+    return not result.success and _CAPTCHA_RATE_LIMIT_TEXT in result.message
+
+
 # Safety cap on how many times we refresh and re-walk the priority list. The
 # natural exit is "every hour in the list shows no free courts"; this cap only
 # kicks in if other users keep releasing slots faster than we can claim them.
@@ -633,6 +644,13 @@ async def run(
                         break
 
                     if _is_site_rejection(result):
+                        # Captcha rate-limit throttles the whole account — another
+                        # walk just re-submits and deepens it. Stop now.
+                        if _is_captcha_rate_limited(result):
+                            log.warning("Captcha rate-limit hit (%s) — aborting; further attempts "
+                                        "only deepen the throttle.", result.message)
+                            out = result
+                            break
                         log.info("Slot %s:00 rejected by site (%s). Refreshing to re-walk priority list.",
                                  chosen_hour, result.message)
                         continue
