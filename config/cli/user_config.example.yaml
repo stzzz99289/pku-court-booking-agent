@@ -47,11 +47,17 @@ captcha:
 #   picked from the resolved target `date`: Mon–Fri uses *_workday, Sat–Sun
 #   uses *_weekend. Both keys are required (use the same list for both if
 #   you don't want to differentiate).
+# court_priority (optional): ordered list of 0-based court indices preferred
+#   when several courts are free at the chosen hour. It overrides the front of
+#   the default natural order (0, 1, 2, ...); unlisted courts follow in natural
+#   order. E.g. [3] → 3, 0, 1, 2, 4, ...; [2, 1] → 2, 1, 0, 3, ... Omit for the
+#   natural default.
 workers:
   - user: "alice"
     date: "3-days-later"
     start_time_list_workday: ['20', '21', '19']
     start_time_list_weekend: ['09', '10', '11', '20', '21']
+    # court_priority: [2, 1]
   # - user: "bob"
   #   date: "20250327"
   #   start_time_list_workday: ['10', '11']

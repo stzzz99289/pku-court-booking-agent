@@ -21,7 +21,7 @@ from .booking_flow import (
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
 from .captcha import ManualCaptchaSolver
 from .config import AppConfig, UserConfig, WorkerConfig, load_config
-from .login import ensure_logged_in
+from .login import ensure_logged_in, session_token_expired
 from .orders import Order, fetch_user_orders, format_orders_table
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
 from .result import BookingResult
@@ -92,8 +92,17 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     try:
         await modal.wait_for(state="visible", timeout=1_500)
     except Exception:
+        # No "请登录后访问" modal — but the stored JWT may have expired, which
+        # raises a different modal ("Token已失效") while the page still paints
+        # the logged-in shell from stale localStorage. Force a fresh login.
+        if await session_token_expired(page):
+            log.info("Expired-token modal detected — forcing fresh re-login.")
+            await ensure_logged_in(page, cfg, login_solver, force=True)
+            log.info("Re-navigating to venue reservation after forced re-login.")
+            await _goto_with_retry(page, url)
+            log.info("Landed on: %s", page.url)
         await _ensure_date_buttons_visible(page)
-        return  # Modal did not appear — already logged in.
+        return  # Already logged in (or just re-logged-in).
     log.info("'Please login' modal detected — dismissing and re-authenticating.")
     await page.get_by_role("button", name="确定").first.click()
     await ensure_logged_in(page, cfg, login_solver)
@@ -457,7 +466,7 @@ async def _attempt_book_from_priority_list(
         cache_pick = None
         for hour in cfg.start_time_list:
             tried.append(hour)
-            free_courts = prioritize_courts(cache.get(int(hour)) or [])
+            free_courts = prioritize_courts(cache.get(int(hour)) or [], cfg.court_priority)
             if free_courts:
                 cache_pick = (hour, free_courts[0])
                 break
@@ -629,6 +638,13 @@ async def run(
                     # actually loaded.
                     if result.details.get("transient") and transient_attempts < _MAX_TRANSIENT_RETRIES:
                         transient_attempts += 1
+                        # Expired-token transient: the stored JWT is dead, so a
+                        # plain re-navigate hits the same wall. Force a fresh
+                        # login (clears stale storage + re-authenticates) first.
+                        if result.details.get("session_expired"):
+                            log.warning("Session token expired — forcing re-login before retry.")
+                            with cfg.profiler.span("relogin"):
+                                await ensure_logged_in(page, cfg, login_solver, force=True)
                         log.warning(
                             "Transient failure (%s). Re-navigating (transient retry %d/%d).",
                             result.message, transient_attempts, _MAX_TRANSIENT_RETRIES,
@@ -706,6 +722,7 @@ def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi
     cfg.login_method = user.login_method
     cfg.date = worker.date
     cfg.start_time_list = list(worker.active_start_time_list())
+    cfg.court_priority = list(worker.court_priority)
     # Drives the post-fire stagger in `_wait_for_scheduled_time` so workers
     # don't all hit the day_info XHR at the same instant.
     cfg.worker_index = index

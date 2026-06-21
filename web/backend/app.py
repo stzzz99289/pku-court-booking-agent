@@ -250,6 +250,7 @@ async def page_schedule(request: Request) -> HTMLResponse:
             "user": w.user,
             "date": w.date,
             "start_time_list": list(w.active_start_time_list()),
+            "court_priority": list(w.court_priority),
         }
         for w in cfg.workers
     ]

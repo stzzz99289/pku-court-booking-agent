@@ -106,19 +106,18 @@ def _sel(cfg: AppConfig, name: str) -> str:
 # free".
 _FREE_STATUS = 1
 
-# Hard-coded court preference: try the 2nd and 3rd courts (0-based index 1, 2)
-# first, then fall back to the 1st court (index 0), then the rest in order.
-# Order of preference: 1, 2, 0, 3, 4, 5, ...
-_COURT_PRIORITY_RANK = {1: 0, 2: 1, 0: 2}
+def prioritize_courts(court_indices: list[int], priority: list[int] | None = None) -> list[int]:
+    """Reorder free court indices by a per-worker preference.
 
-
-def prioritize_courts(court_indices: list[int]) -> list[int]:
-    """Reorder free court indices by the hard-coded preference (1, 2, 0, 3, 4, ...).
-
-    Courts 1 and 2 (the 2nd and 3rd courts) are preferred, then court 0, then
-    any remaining courts in ascending index order.
+    Default (no `priority`) is natural order: 0, 1, 2, 3, ... A worker's
+    `priority` list overrides the front of that order — its entries come first,
+    in the given order, and any court not listed falls back to natural order
+    after them. E.g. priority [3] → 3, 0, 1, 2, 4, ...; [2, 1] → 2, 1, 0, 3, ...
+    Courts listed in `priority` but not actually free are simply absent.
     """
-    return sorted(court_indices, key=lambda c: _COURT_PRIORITY_RANK.get(c, c))
+    priority = priority or []
+    rank = {c: i for i, c in enumerate(priority)}
+    return sorted(court_indices, key=lambda c: rank[c] if c in rank else len(priority) + c)
 
 
 def parse_day_info(payload: dict) -> dict[int, list[int]]:
@@ -179,6 +178,17 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
     buttons = page.locator(".date_box > div")
     count = await buttons.count()
     if count == 0:
+        # An empty date box with an expired-token modal means the stored JWT
+        # is dead (the page still rendered the logged-in shell from stale
+        # localStorage). Flag it so the runner forces a fresh login before the
+        # retry instead of pointlessly re-navigating with the same dead token.
+        from .login import session_token_expired
+        if await session_token_expired(page):
+            return BookingResult(
+                False,
+                "Session token expired (Token已失效); re-login required.",
+                {"transient": True, "session_expired": True},
+            )
         # Transient: the runner can re-navigate and try again. The
         # retry-with-reload inside `_ensure_date_buttons_visible` should
         # normally catch this earlier; reaching here means even reloads
@@ -376,7 +386,7 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
         free_courts.append((this_court_idx, target_cell, first_cell))
 
     if free_courts:
-        order = {c: i for i, c in enumerate(prioritize_courts([c for c, _, _ in free_courts]))}
+        order = {c: i for i, c in enumerate(prioritize_courts([c for c, _, _ in free_courts], cfg.court_priority))}
         free_courts.sort(key=lambda fc: order[fc[0]])
         _, target_cell, label = free_courts[0]
         log.info("Clicking court %s at %s (court_idx=%d, priority pick).", label, target_time, free_courts[0][0])

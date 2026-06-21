@@ -84,11 +84,18 @@ class WorkerConfig:
     Workday vs. weekend lists are picked at runtime based on the resolved
     target `date` (Mon–Fri → workday, Sat–Sun → weekend), so a single worker
     entry can cover both kinds of days with different slot preferences.
+
+    `court_priority` is an optional ordered list of 0-based court indices that
+    overrides the front of the default natural court order (0, 1, 2, ...) when
+    several courts are free at the chosen hour. Its entries come first, then
+    any unlisted court in natural order. E.g. [3] → 3, 0, 1, 2, 4, ...;
+    [2, 1] → 2, 1, 0, 3, ... An empty list keeps the natural default.
     """
     user: str  # must match a UserConfig.name
     date: str
     start_time_list_workday: list[str]
     start_time_list_weekend: list[str]
+    court_priority: list[int] = field(default_factory=list)
 
     def active_start_time_list(self) -> list[str]:
         """Return workday or weekend list based on `self.date`'s weekday."""
@@ -149,6 +156,10 @@ class AppConfig:
     # Set by the runner before calling `select_court_time` when the JSON cache
     # picked a specific court row. -1 means "fall back to row-walk".
     target_court_index: int = -1
+    # Per-worker court preference: 0-based court indices that override the front
+    # of the default natural order (0, 1, 2, ...) when several courts are free.
+    # Set by the runner from the active worker; empty keeps the natural default.
+    court_priority: list[int] = field(default_factory=list)
     # When true, the booking flow records per-stage latencies via `cfg.profiler`
     # and prints a summary at the end. Off by default so production runs pay
     # zero overhead (`Profiler.span` becomes a no-op when disabled).
@@ -361,6 +372,41 @@ def _parse_start_time_list(raw: Any, worker_index: int, field_name: str) -> list
     return out
 
 
+def _parse_court_priority(raw: Any, worker_index: int) -> list[int]:
+    """Validate and normalize a worker's optional `court_priority`.
+
+    Each entry is a 0-based court index (non-negative int; numeric strings are
+    coerced). Duplicates are rejected. Out-of-range indices are allowed — they
+    simply never match a free court. Missing/empty → [] (natural default).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"workers[{worker_index}].court_priority must be a list of 0-based court indices."
+        )
+    out: list[int] = []
+    seen: set[int] = set()
+    for j, entry in enumerate(raw):
+        try:
+            c = int(str(entry).strip())
+        except ValueError:
+            raise ValueError(
+                f"workers[{worker_index}].court_priority[{j}] must be an integer, got {entry!r}."
+            )
+        if c < 0:
+            raise ValueError(
+                f"workers[{worker_index}].court_priority[{j}] must be non-negative, got {c}."
+            )
+        if c in seen:
+            raise ValueError(
+                f"workers[{worker_index}].court_priority[{j}] duplicates index {c}."
+            )
+        seen.add(c)
+        out.append(c)
+    return out
+
+
 def _parse_workers(
     data: dict[str, Any], users: list[UserConfig], today: date | None = None,
 ) -> list[WorkerConfig]:
@@ -387,6 +433,7 @@ def _parse_workers(
                 w["start_time_list_workday"], i, "start_time_list_workday"),
             start_time_list_weekend=_parse_start_time_list(
                 w["start_time_list_weekend"], i, "start_time_list_weekend"),
+            court_priority=_parse_court_priority(w.get("court_priority"), i),
         ))
     return workers
 

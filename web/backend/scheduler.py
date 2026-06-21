@@ -372,6 +372,7 @@ class Scheduler:
             wcfg = per_user_config(cfg, user)
             wcfg.date = w.date
             wcfg.start_time_list = list(w.active_start_time_list())
+            wcfg.court_priority = list(w.court_priority)
             wcfg.headless = True
             # Force scheduled_mode on regardless of YAML — without it the
             # booking flow would submit immediately on the (still-stale) page
@@ -396,6 +397,7 @@ class Scheduler:
                     "user": user_name,
                     "date": wcfg.date,
                     "start_time_list": list(wcfg.start_time_list),
+                    "court_priority": list(wcfg.court_priority),
                     "result": self._serialize_result(result),
                     "events": events,
                 })

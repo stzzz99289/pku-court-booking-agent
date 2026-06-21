@@ -21,14 +21,18 @@
   <h3 class="subhead">Workers ({{ workers|length }})</h3>
   {% if workers %}
   <table class="data">
-    <thead><tr><th>User</th><th>Date</th><th>Slot priority</th></tr></thead>
+    <thead><tr><th>User</th><th>Date</th><th>Slot priority</th><th>Court priority</th></tr></thead>
     <tbody>
       {% for w in workers %}
       <tr><td>{{ w.user }}</td><td>{{ w.date }}</td>
-        <td>{% for h in w.start_time_list %}<code class="hour-tag">{{ h }}:00</code>{% endfor %}</td></tr>
+        <td>{% for h in w.start_time_list %}<code class="hour-tag">{{ h }}:00</code>{% endfor %}</td>
+        <td>{% if w.court_priority %}{% for c in w.court_priority %}<code class="hour-tag">#{{ c }}</code>{% endfor %}{% else %}<span class="muted">default</span>{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  <p class="hint">Court priority is 0-based court indices (<code>#0</code> = 1号); listed
+    courts are preferred first, then the rest in natural order. <span class="muted">default</span>
+    = natural order <code>#0, #1, #2, …</code></p>
   {% else %}
     <p class="hint">No workers configured.</p>
   {% endif %}

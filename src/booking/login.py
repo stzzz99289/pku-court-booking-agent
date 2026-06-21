@@ -37,6 +37,30 @@ async def _session_looks_logged_in(page: Page) -> bool:
     return False
 
 
+# The SPA stores its auth as a JWT in localStorage (no cookies). When that token
+# expires the page still paints the logged-in shell from stale localStorage, so
+# `_session_looks_logged_in` returns a false positive. The only reliable runtime
+# signal is the modal the SPA raises when an authenticated API call is rejected.
+_SESSION_EXPIRED_TEXTS = ("Token已失效", "请重新登录", "登录已过期", "登录失效")
+
+
+async def session_token_expired(page: Page) -> bool:
+    """True if a 'token expired / please log in again' modal is visible.
+
+    Reliable across the false-positive shell render: surfaced only when the
+    server rejects the stored JWT, so it means the persisted session is dead
+    and a fresh login is required even though "欢迎您/退出" may still show.
+    """
+    for txt in _SESSION_EXPIRED_TEXTS:
+        loc = page.get_by_text(txt, exact=False)
+        try:
+            if await loc.count() > 0 and await loc.first.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
 async def _dismiss_please_login_modal(page: Page) -> bool:
     """If the home page is fronted by a '请登录后访问' modal, click 确定. Returns True if dismissed."""
     modal = page.get_by_text("请登录后访问", exact=True)
@@ -105,16 +129,36 @@ async def _open_login_form(page: Page, cfg: AppConfig) -> None:
     await page.wait_for_load_state("domcontentloaded")
 
 
-async def ensure_logged_in(page: Page, cfg: AppConfig, solver: CaptchaSolver) -> None:
-    """Skip if already logged in; otherwise complete the login flow for the configured method."""
-    # Return early if a valid session is detected.
-    ind = _sel(cfg, "logged_in_indicator")
-    if ind and await page.locator(ind).count() and await page.locator(ind).first.is_visible():
-        log.info("Session appears logged in (logged_in_indicator visible).")
-        return
-    if await _session_looks_logged_in(page):
-        log.info("Session appears logged in (saved session / heuristic).")
-        return
+async def ensure_logged_in(
+    page: Page, cfg: AppConfig, solver: CaptchaSolver, force: bool = False,
+) -> None:
+    """Skip if already logged in; otherwise complete the login flow for the configured method.
+
+    `force=True` skips the (shell-render-fooled) early-return heuristics and
+    performs a fresh login. It first clears the stale localStorage JWT so the
+    SPA drops to a logged-out state, since with an expired token the page still
+    paints the "欢迎您/退出" shell and the login button would never appear.
+    """
+    if force:
+        log.info("Forcing re-login (clearing stale session storage / expired token).")
+        try:
+            await page.evaluate(
+                "() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }")
+        except Exception as e:
+            log.warning("Could not clear storage before forced re-login: %s", e)
+        try:
+            await page.goto(cfg.base_url, wait_until="domcontentloaded")
+        except Exception as e:
+            log.warning("Could not reload base_url before forced re-login: %s", e)
+    else:
+        # Return early if a valid session is detected.
+        ind = _sel(cfg, "logged_in_indicator")
+        if ind and await page.locator(ind).count() and await page.locator(ind).first.is_visible():
+            log.info("Session appears logged in (logged_in_indicator visible).")
+            return
+        if await _session_looks_logged_in(page):
+            log.info("Session appears logged in (saved session / heuristic).")
+            return
 
     method = (cfg.login_method or "alumni").strip().lower()
     await _open_login_form(page, cfg)
