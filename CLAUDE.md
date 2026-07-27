@@ -43,9 +43,10 @@ unknown names. The CLI pair keeps credentials inline in its own
 `user_config.yaml` (one-file UX for local use).
 
 `src/booking/config.py` merges site + user into an `AppConfig` dataclass and
-validates required top-level keys at load time. Selectors live in
-`SelectorConfig` (~25 fields); adding/changing a selector only requires
-editing the relevant `site_config.yaml`.
+validates required top-level keys at load time. Shared production selectors
+live in `src/booking/site_constants.py` and populate `SelectorConfig`; a
+`site_config.yaml` may still override them for one-off or environment-specific
+testing.
 
 ## Architecture
 
@@ -112,7 +113,8 @@ previous run's log after a webapp restart.
 When CSS/role selectors break or need updating, use `--print-alignment` to get the DevTools MCP checklist, then:
 1. Run with `headless: false` in the relevant `config/.../site_config.yaml`
 2. Use Playwright DevTools / MCP snapshot tools to find stable locators
-3. Update selectors in `site_config.yaml` (never hardcode selectors in Python)
+3. Update shared selectors in `src/booking/site_constants.py`, or use a
+   `site_config.yaml` override for a one-off test
 
 ## CAPTCHA Solving
 

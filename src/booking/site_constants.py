@@ -45,7 +45,7 @@ SELECTORS: dict[str, str] = {
     "username_input": 'role=textbox[name="手机号"]',
     "password_input": 'role=textbox[name="密码"]',
     "login_captcha_image": 'img[src^="blob"]',
-    "login_captcha_input": 'role=textbox[name="验证码"]',
+    "login_captcha_input": 'input[placeholder="验证码"]',
     "login_captcha_refresh": "",
     "login_submit": 'role=button[name="登录"]',
     # Optional marker; if empty, code still treats visible 退出 / 欢迎您 as logged-in.
