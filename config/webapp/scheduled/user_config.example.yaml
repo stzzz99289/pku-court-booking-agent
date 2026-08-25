@@ -11,6 +11,7 @@ venue_id: 85   # 五四体育中心-室外网球场
 # want to differentiate.
 workers:
   - user: "alice"
-    date: "7-days-later"
+    # Since 2026-08-26, PKU releases the next day's courts at 12:00.
+    date: "1-day-later"
     start_time_list_workday: ['20', '21', '19', '18']
     start_time_list_weekend: ['09', '10', '11', '20', '21']
