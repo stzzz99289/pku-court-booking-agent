@@ -16,7 +16,7 @@
         <div><h1>Welcome back</h1><p>Sign in to manage court bookings.</p></div>
       </div>
       {% if error %}
-        <p class="login-error">Invalid username or password.</p>
+        <p class="login-error">{% if error == "limited" %}Too many attempts. Try again later.{% else %}Invalid username or password.{% endif %}</p>
       {% endif %}
       <form method="post" action="/login" class="form-grid">
         <input type="hidden" name="next" value="{{ next }}">

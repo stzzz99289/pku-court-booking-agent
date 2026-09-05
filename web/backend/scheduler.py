@@ -30,7 +30,7 @@ from src.booking import runner
 from src.booking.config import AppConfig
 from src.booking.result import BookingResult
 from web.backend.config_loader import load_set, per_user_config
-from web.backend.jobs import get_booking_lock
+from web.backend.jobs import get_booking_lock, redact_sensitive_text, redact_sensitive_value
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class _FileLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             with self.path.open("a", encoding="utf-8") as f:
-                f.write(self.format(record) + "\n")
+                f.write(redact_sensitive_text(self.format(record)) + "\n")
         except Exception:
             pass
 
@@ -105,7 +105,7 @@ class _RingLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self.ring.append(self.format(record))
+            self.ring.append(redact_sensitive_text(self.format(record)))
         except Exception:
             pass
 
@@ -190,8 +190,8 @@ class Scheduler:
             "no_test_window_start": self.no_test_window_start(),
             "no_test_window_active": self.in_no_test_window(now),
             "now": now,
-            "last_run": self.last_run,
-            "logs": logs,
+            "last_run": redact_sensitive_value(self.last_run),
+            "logs": [redact_sensitive_text(line) for line in logs],
             "log_total": len(logs),
         }
 
@@ -277,14 +277,14 @@ class Scheduler:
             log.info("scheduler: run finished. %d/%d worker(s) succeeded.",
                      sum(1 for r in results if r.success), len(results))
         except Exception as e:
-            errors.append(f"{type(e).__name__}: {e}")
+            errors.append(redact_sensitive_text(f"{type(e).__name__}: {e}"))
             log.exception("scheduler: run aborted with exception.")
         finally:
             for lg in (booking_log, my_log):
                 lg.removeHandler(file_h)
                 lg.removeHandler(ring_h)
             finished_at = time.time()
-            self.last_run = {
+            self.last_run = redact_sensitive_value({
                 "started_at": started_at,
                 "finished_at": finished_at,
                 "duration_s": round(finished_at - started_at, 1),
@@ -292,7 +292,7 @@ class Scheduler:
                 "worker_count": len(results),
                 "results": [self._serialize_result(r) for r in results],
                 "errors": errors,
-            }
+            })
             try:
                 META_FILE.write_text(
                     json.dumps(self.last_run, indent=2, ensure_ascii=False),
@@ -320,13 +320,13 @@ class Scheduler:
             PROFILES_DIR.mkdir(parents=True, exist_ok=True)
             date_str = datetime.fromtimestamp(started_at).strftime("%Y%m%d")
             path = PROFILES_DIR / f"scheduled_{date_str}.json"
-            payload = {
+            payload = redact_sensitive_value({
                 "fire_date": date_str,
                 "started_at": started_at,
                 "finished_at": finished_at,
                 "duration_s": round(finished_at - started_at, 1),
                 "workers": worker_profiles,
-            }
+            })
             path.write_text(
                 json.dumps(payload, indent=2, ensure_ascii=False),
                 encoding="utf-8",
@@ -341,10 +341,13 @@ class Scheduler:
         # Ensure JSON-safe (nested details may contain non-serializable types).
         try:
             json.dumps(d)
-            return d
+            return redact_sensitive_value(d)
         except TypeError:
-            return {"success": r.success, "message": r.message,
-                    "details": {"_repr": repr(r.details)}}
+            return redact_sensitive_value({
+                "success": r.success,
+                "message": r.message,
+                "details": {"_repr": repr(r.details)},
+            })
 
     async def _run_workers(
         self, cfg: AppConfig,

@@ -95,7 +95,8 @@ cp config/webapp/auth.example.yaml config/webapp/auth.yaml
 python -m web.backend.auth secret
 
 # 3. Generate a password hash. You will be prompted for the password twice;
-#    nothing is echoed. Copy the printed `pbkdf2_sha256$…` line and paste it
+#    nothing is echoed. Use a unique password of at least 15 characters. Copy
+#    the printed `$argon2id$…` line and paste it
 #    as the `password_hash:` value in auth.yaml.
 python -m web.backend.auth hash
 
@@ -105,12 +106,14 @@ $EDITOR config/webapp/auth.yaml
 ```
 
 `auth.yaml` is gitignored — never commit it. Keep it `chmod 600` on shared
-machines.
+machines. The generated password hash uses memory-hard Argon2id; the plaintext
+dashboard password is never stored. Older PBKDF2 hashes still work so existing
+installations can migrate without being locked out.
 
 **Option B — environment variables (recommended for systemd / containers).**
 
 Set these three env vars in the unit file / shell that launches the webapp.
-They override `auth.yaml` if both are present.
+They override `auth.yaml` when all three are present.
 
 ```bash
 export WEBAPP_USER='admin'
@@ -123,6 +126,30 @@ export WEBAPP_SECRET="$(python -m web.backend.auth secret)"
 sessions stay valid until they expire (7 days) or until you also rotate
 `secret:` — rotating the secret invalidates every existing session
 immediately.
+
+The login endpoint rate-limits failed attempts by source IP and globally.
+Changing the username or password requires a webapp restart because auth is
+loaded once at startup.
+
+#### Court-booking accounts
+
+Booking-site accounts are separate from the dashboard login. Store them only
+in the gitignored `config/webapp/accounts.yaml`, following
+`accounts.example.yaml`; the dashboard deliberately returns only each user's
+local alias and login method, never the account/phone number or password.
+
+```bash
+$EDITOR config/webapp/accounts.yaml
+chmod 600 config/webapp/accounts.yaml config/webapp/auth.yaml
+```
+
+To add a booking account, add another item under `users:` with a unique
+`name`, `account`, `password`, and `login_method`. To remove one, first remove
+scheduled/test worker entries that reference its `name`, then remove that user.
+Restart the webapp after editing. These credentials must be readable by the
+booking process to log into the PKU site, so they are plaintext at rest: protect
+the server account and file permissions, never commit or download these files,
+and do not expose the project directory through a web/file server.
 
 **On the client.** No client-side setup. Open the URL, the webapp redirects
 you to `/login`, you type the username + password from above, and the

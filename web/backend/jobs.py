@@ -18,6 +18,33 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger(__name__)
 
 JOB_LOG_CAPACITY = 2000
+_redaction_values: tuple[str, ...] = ()
+
+
+def configure_secret_redaction(values: list[str]) -> None:
+    """Register runtime secrets that must never cross the dashboard boundary."""
+    global _redaction_values
+    _redaction_values = tuple(
+        sorted({value for value in values if len(value) >= 4}, key=len, reverse=True)
+    )
+
+
+def redact_sensitive_text(value: str) -> str:
+    for secret in _redaction_values:
+        value = value.replace(secret, "[REDACTED]")
+    return value
+
+
+def redact_sensitive_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {key: redact_sensitive_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_sensitive_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_value(item) for item in value)
+    return value
 
 
 @dataclass
@@ -33,7 +60,7 @@ class Job:
     task: asyncio.Task | None = None
 
     def append_log(self, line: str) -> None:
-        self.logs.append(line)
+        self.logs.append(redact_sensitive_text(line))
 
     def to_dict(self, log_offset: int = 0) -> dict[str, Any]:
         all_logs = list(self.logs)
@@ -43,8 +70,8 @@ class Job:
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "error": self.error,
-            "result": self.result,
+            "error": redact_sensitive_text(self.error),
+            "result": redact_sensitive_value(self.result),
             "logs": all_logs[log_offset:],
             "log_total": len(all_logs),
         }
@@ -107,7 +134,7 @@ class JobManager:
                 job.status = "succeeded"
             except Exception as e:
                 job.status = "failed"
-                job.error = f"{type(e).__name__}: {e}"
+                job.error = redact_sensitive_text(f"{type(e).__name__}: {e}")
                 job.append_log(f"[job failed] {job.error}")
                 log.exception("Job %s (%s) failed", job_id, kind)
             finally:

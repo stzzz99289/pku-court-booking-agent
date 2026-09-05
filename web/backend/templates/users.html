@@ -8,14 +8,13 @@
   <div class="table-wrap">
   <table class="data mobile-cards">
     <thead>
-      <tr><th>Name</th><th>Login method</th><th>Account</th><th>Session</th><th>Last used</th></tr>
+      <tr><th>Name</th><th>Login method</th><th>Session</th><th>Last used</th></tr>
     </thead>
     <tbody>
       {% for u in users %}
       <tr data-user="{{ u.name }}">
         <td data-label="Name"><strong>{{ u.name }}</strong></td>
         <td data-label="Login method">{{ u.login_method }}</td>
-        <td data-label="Account">{{ u.account_masked }}</td>
         <td data-label="Session">
           {% if u.valid_hint %}<span class="badge ok">likely valid</span>
           {% elif u.exists %}<span class="badge warn">stale</span>

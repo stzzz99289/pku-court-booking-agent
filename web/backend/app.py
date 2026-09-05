@@ -19,6 +19,7 @@ from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -35,7 +36,12 @@ from src.booking.result import BookingResult  # noqa: E402
 from src.booking.site_constants import VENUES  # noqa: E402
 from web.backend import auth as auth_mod  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
-from web.backend.jobs import Job, get_booking_lock, get_job_manager  # noqa: E402
+from web.backend.jobs import (  # noqa: E402
+    Job,
+    configure_secret_redaction,
+    get_booking_lock,
+    get_job_manager,
+)
 from web.backend.order_cache import get_order_cache  # noqa: E402
 from web.backend.scheduler import get_scheduler  # noqa: E402
 
@@ -68,7 +74,16 @@ templates.env.globals["asset_version"] = _asset_version
 
 @contextlib.asynccontextmanager
 async def _lifespan(_: FastAPI):
-    auth_mod.load_auth(secure_cookie=(WEBAPP_MODE == "remote"))
+    auth = auth_mod.load_auth(secure_cookie=(WEBAPP_MODE == "remote"))
+    secret_cfg = load_set("test")
+    configure_secret_redaction([
+        auth.password_hash,
+        auth.secret.decode("utf-8", errors="ignore"),
+        secret_cfg.captcha.username,
+        secret_cfg.captcha.api_key,
+        secret_cfg.captcha.softid,
+        *(value for user in secret_cfg.users for value in (user.account, user.password)),
+    ])
     scheduler = get_scheduler()
     order_cache = get_order_cache()
     await scheduler.start()
@@ -94,13 +109,41 @@ async def _redirect_handler(_: Request, exc: auth_mod._RedirectException):
 
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("origin")
+        if origin and urlsplit(origin).netloc != request.headers.get("host", ""):
+            return _security_headers(
+                request,
+                JSONResponse({"detail": "cross-origin request rejected"}, status_code=403),
+            )
     try:
         await auth_mod.auth_dependency(request)
     except auth_mod._RedirectException as exc:
-        return exc.response
+        return _security_headers(request, exc.response)
     except HTTPException as exc:
-        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-    return await call_next(request)
+        return _security_headers(
+            request, JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        )
+    response = await call_next(request)
+    return _security_headers(request, response)
+
+
+def _security_headers(request: Request, response):
+    """Apply browser hardening headers to every response."""
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'self'; form-action 'self'; "
+        "frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if not request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    if WEBAPP_MODE == "remote":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -126,7 +169,7 @@ def _session_valid_hint(user_data_dir: Path) -> dict[str, Any]:
 
 
 def _users_payload() -> list[dict[str, Any]]:
-    """List users from accounts.yaml plus per-user session-valid hint."""
+    """Return an allowlisted public view; never expose booking credentials."""
     cfg = load_set("test")  # accounts.yaml is shared across both sets
     base_profile = Path(cfg.user_data_dir).resolve()
     out: list[dict[str, Any]] = []
@@ -135,7 +178,6 @@ def _users_payload() -> list[dict[str, Any]]:
         out.append({
             "name": u.name,
             "login_method": u.login_method,
-            "account_masked": (u.account[:3] + "***" + u.account[-2:]) if len(u.account) > 5 else "***",
             **hint,
         })
     return out
@@ -154,7 +196,7 @@ async def healthz() -> JSONResponse:
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, next: str = "/", error: str = "") -> HTMLResponse:
     if auth_mod.is_authenticated(request):
-        return RedirectResponse(url=next or "/", status_code=303)
+        return RedirectResponse(url=_safe_next(next), status_code=303)
     return templates.TemplateResponse(
         request, "login.html",
         {"next": next or "/", "error": error},
@@ -163,23 +205,43 @@ async def login_page(request: Request, next: str = "/", error: str = "") -> HTML
 
 @app.post("/login")
 async def login_submit(
+    request: Request,
     username: str = Form(...),
     password: str = Form(...),
     next: str = Form("/"),
 ):
     auth = auth_mod.get_auth()
-    ok = (username == auth.username) and auth_mod.verify_password(password, auth.password_hash)
-    if not ok:
-        # Re-render with error; never echo the submitted password back.
+    client_ip = request.client.host if request.client else "unknown"
+    if auth_mod.login_rate_limiter.is_limited(client_ip):
         return RedirectResponse(
-            url=f"/login?error=invalid&next={next or '/'}",
+            url="/login?" + urlencode({"error": "limited", "next": next or "/"}),
             status_code=303,
         )
+    # Always run the expensive password check so an unknown username does not
+    # create a cheap timing oracle.
+    password_ok = auth_mod.verify_password(password, auth.password_hash)
+    username_ok = (
+        len(username) <= auth_mod.MAX_USERNAME_LENGTH
+        and auth_mod.constant_time_text_equal(username, auth.username)
+    )
+    ok = username_ok and password_ok
+    if not ok:
+        auth_mod.login_rate_limiter.record_failure(client_ip)
+        # Re-render with error; never echo the submitted password back.
+        return RedirectResponse(
+            url="/login?" + urlencode({"error": "invalid", "next": next or "/"}),
+            status_code=303,
+        )
+    auth_mod.login_rate_limiter.clear_ip(client_ip)
     # Only allow same-origin redirects.
-    target = next if (next or "").startswith("/") else "/"
+    target = _safe_next(next)
     response = RedirectResponse(url=target, status_code=303)
     auth_mod.issue_session(response, username)
     return response
+
+
+def _safe_next(value: str) -> str:
+    return value if value.startswith("/") and not value.startswith("//") else "/"
 
 
 @app.get("/logout")

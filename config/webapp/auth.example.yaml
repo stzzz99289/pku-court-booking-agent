@@ -7,5 +7,5 @@
 #     python -m web.backend.auth secret
 
 username: "admin"
-password_hash: "pbkdf2_sha256$200000$REPLACE$REPLACE"
+password_hash: "$argon2id$REPLACE_WITH_GENERATED_HASH"
 secret: "REPLACE_WITH_OUTPUT_OF_python_-m_web.backend.auth_secret"

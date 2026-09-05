@@ -1,6 +1,6 @@
 """Single-user cookie-session auth for the webapp.
 
-There is exactly one account. Username + a PBKDF2-SHA256 password hash come
+There is exactly one account. Username + a password hash come
 from env vars (`WEBAPP_USER`, `WEBAPP_PASSWORD_HASH`) or, as a fallback, from
 `config/webapp/auth.yaml`. The session cookie is an HMAC-signed token; the
 HMAC key comes from `WEBAPP_SECRET` (env or auth.yaml).
@@ -14,21 +14,45 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import os
 import secrets
+import threading
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from argon2 import PasswordHasher, Type
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AUTH_YAML = PROJECT_ROOT / "config" / "webapp" / "auth.yaml"
+log = logging.getLogger(__name__)
 
 COOKIE_NAME = "pku_session"
 SESSION_TTL_S = 7 * 24 * 3600  # 7 days
-PBKDF2_ITERATIONS = 200_000
+PBKDF2_ITERATIONS = 600_000
+MAX_USERNAME_LENGTH = 128
+MAX_PASSWORD_LENGTH = 1024
+
+# OWASP's minimum Argon2id work factors: 19 MiB memory, 2 iterations, 1 lane.
+_ARGON2 = PasswordHasher(
+    time_cost=2,
+    memory_cost=19 * 1024,
+    parallelism=1,
+    hash_len=32,
+    salt_len=16,
+    type=Type.ID,
+)
+
+# Layered throttles make online guessing expensive while avoiding a permanent
+# lockout. State is intentionally process-local; this app runs as one worker.
+LOGIN_WINDOW_S = 15 * 60
+LOGIN_MAX_FAILURES_PER_IP = 10
+LOGIN_MAX_FAILURES_GLOBAL = 50
 
 
 @dataclass
@@ -74,6 +98,11 @@ def load_auth(secure_cookie: bool) -> AuthConfig:
         secret=str(secret).encode("utf-8"),
         secure_cookie=secure_cookie,
     )
+    if password_hash_needs_upgrade(_auth.password_hash):
+        log.warning(
+            "dashboard password uses a legacy hash; generate an Argon2id hash "
+            "with `python -m web.backend.auth hash`"
+        )
     return _auth
 
 
@@ -84,17 +113,33 @@ def get_auth() -> AuthConfig:
 
 
 # ---------------------------------------------------------------------------
-# Password hashing (PBKDF2-SHA256, stdlib only)
+# Password hashing (Argon2id; legacy PBKDF2 hashes remain verifiable)
 # ---------------------------------------------------------------------------
 
 
-def hash_password(password: str, *, iterations: int = PBKDF2_ITERATIONS) -> str:
+def hash_password(password: str) -> str:
+    return _ARGON2.hash(password)
+
+
+def _hash_password_pbkdf2(password: str, *, iterations: int = PBKDF2_ITERATIONS) -> str:
+    """Generate a legacy hash for compatibility tests and migrations."""
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${_b64e(salt)}${_b64e(digest)}"
 
 
 def verify_password(password: str, encoded: str) -> bool:
+    if len(password) > MAX_PASSWORD_LENGTH:
+        return False
+    if encoded.startswith("$argon2id$"):
+        try:
+            return _ARGON2.verify(encoded, password)
+        except (InvalidHashError, VerificationError, VerifyMismatchError):
+            return False
+    return _verify_password_pbkdf2(password, encoded)
+
+
+def _verify_password_pbkdf2(password: str, encoded: str) -> bool:
     try:
         scheme, iters_s, salt_b64, hash_b64 = encoded.split("$")
     except ValueError:
@@ -109,6 +154,56 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
     candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return hmac.compare_digest(candidate, expected)
+
+
+def password_hash_needs_upgrade(encoded: str) -> bool:
+    """Return True for legacy or weaker-than-current password hashes."""
+    if not encoded.startswith("$argon2id$"):
+        return True
+    try:
+        return _ARGON2.check_needs_rehash(encoded)
+    except InvalidHashError:
+        return True
+
+
+class LoginRateLimiter:
+    """Bound failed login attempts by source IP and across the single account."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def _prune(self, events: deque[float], now: float) -> None:
+        cutoff = now - LOGIN_WINDOW_S
+        while events and events[0] <= cutoff:
+            events.popleft()
+
+    def is_limited(self, ip: str, *, now: float | None = None) -> bool:
+        current = time.monotonic() if now is None else now
+        with self._lock:
+            ip_events = self._events[f"ip:{ip}"]
+            global_events = self._events["global"]
+            self._prune(ip_events, current)
+            self._prune(global_events, current)
+            return (
+                len(ip_events) >= LOGIN_MAX_FAILURES_PER_IP
+                or len(global_events) >= LOGIN_MAX_FAILURES_GLOBAL
+            )
+
+    def record_failure(self, ip: str, *, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        with self._lock:
+            for key in (f"ip:{ip}", "global"):
+                events = self._events[key]
+                self._prune(events, current)
+                events.append(current)
+
+    def clear_ip(self, ip: str) -> None:
+        with self._lock:
+            self._events.pop(f"ip:{ip}", None)
+
+
+login_rate_limiter = LoginRateLimiter()
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +247,7 @@ def _verify_cookie(token: str) -> str | None:
             return None
     except ValueError:
         return None
-    if username != auth.username:
+    if not constant_time_text_equal(username, auth.username):
         return None
     return username
 
@@ -198,6 +293,10 @@ def _sign(payload: str, secret: bytes) -> str:
     return _b64e(mac)
 
 
+def constant_time_text_equal(left: str, right: str) -> bool:
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
 def _b64e(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
@@ -218,7 +317,7 @@ def _cli() -> None:
 
     p = argparse.ArgumentParser(description="webapp auth helpers")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("hash", help="prompt for a password and print its PBKDF2 hash")
+    sub.add_parser("hash", help="prompt for a password and print its Argon2id hash")
     sub.add_parser("secret", help="print a fresh random session secret")
     args = p.parse_args()
 
@@ -229,6 +328,8 @@ def _cli() -> None:
             raise SystemExit("passwords do not match")
         if not pw:
             raise SystemExit("empty password")
+        if len(pw) < 15:
+            raise SystemExit("password must be at least 15 characters")
         print(hash_password(pw))
     elif args.cmd == "secret":
         print(secrets.token_urlsafe(48))
