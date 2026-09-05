@@ -18,7 +18,7 @@ let lastFetchedOrders = [];
 
 document.addEventListener("change", (e) => {
   const sel = e.target.closest("#venue-filter");
-  if (sel) renderCombinedOrdersTable(lastFetchedOrders);
+  if (sel) renderOrderCards(lastFetchedOrders);
 });
 
 function _initOnceReady() {
@@ -79,7 +79,7 @@ async function pollAllOrdersJob(jobId, btn) {
     status.innerHTML = renderStatusBadge(job.status);
     if (job.status === "succeeded") {
       lastFetchedOrders = job.result?.orders || [];
-      renderCombinedOrdersTable(lastFetchedOrders);
+      renderOrderCards(lastFetchedOrders);
       break;
     }
     if (job.status === "failed") {
@@ -94,7 +94,7 @@ async function pollAllOrdersJob(jobId, btn) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function renderCombinedOrdersTable(orders) {
+function renderOrderCards(orders) {
   const target = document.getElementById("orders-results");
   const venueSel = document.getElementById("venue-filter");
   const venueFilter = venueSel ? venueSel.value : "";
@@ -108,13 +108,35 @@ function renderCombinedOrdersTable(orders) {
     target.innerHTML = `<p class="hint">${note}</p>`;
     return;
   }
-  const cols = ["user", "order_no", "venue", "use_date", "court_and_time", "amount", "order_status", "created_at"];
-  const labels = ["User", "Order", "Venue", "Use date", "Court & time", "Amount", "Status", "Created"];
-  const head = labels.map((label) => `<th>${label}</th>`).join("");
-  const rows = filtered.map((o) =>
-    "<tr>" + cols.map((c, i) => `<td data-label="${labels[i]}">${escapeHtml(o[c] ?? "")}</td>`).join("") + "</tr>"
-  ).join("");
-  target.innerHTML = `<div class="table-wrap"><table class="data mobile-cards"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  const cards = filtered.map((o) => `
+    <article class="order-card">
+      <div class="order-card-heading">
+        <span class="order-field-label">Order ID</span>
+        <strong class="order-number">${escapeHtml(o.order_no ?? "—")}</strong>
+      </div>
+      <div class="order-primary-info">
+        <div>
+          <span class="order-field-label">Use date</span>
+          <strong>${escapeHtml(o.use_date ?? "—")}</strong>
+        </div>
+        <div>
+          <span class="order-field-label">Court &amp; time</span>
+          <strong>${escapeHtml(o.court_and_time ?? "—")}</strong>
+        </div>
+      </div>
+      <details class="order-details">
+        <summary>Other information</summary>
+        <dl>
+          <div><dt>User</dt><dd>${escapeHtml(o.user ?? "—")}</dd></div>
+          <div><dt>Venue</dt><dd>${escapeHtml(o.venue ?? "—")}</dd></div>
+          <div><dt>Amount</dt><dd>${escapeHtml(o.amount ?? "—")}</dd></div>
+          <div><dt>Status</dt><dd>${escapeHtml(o.order_status ?? "—")}</dd></div>
+          <div><dt>Created</dt><dd>${escapeHtml(o.created_at ?? "—")}</dd></div>
+        </dl>
+      </details>
+    </article>
+  `).join("");
+  target.innerHTML = `<div class="order-list">${cards}</div>`;
 }
 
 function escapeHtml(s) {
