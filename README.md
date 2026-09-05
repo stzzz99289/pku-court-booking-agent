@@ -68,8 +68,9 @@ auth setup is the same for both.
 
 The three tabs are:
 
-- **Users & Orders** — lists users from `config/webapp/accounts.yaml` plus a
-  per-user "Refresh orders" button.
+- **Users & Orders** — lists users from `config/webapp/accounts.yaml` and
+  cached paid orders. The cache refreshes daily at 08:00, survives restarts,
+  and can also be refreshed manually.
 - **Run Booking** — one-off headless booking, pre-filled from
   `config/webapp/test/user_config.yaml`. The "Run now" button is greyed out
   while the scheduled task is running or in its prep window.

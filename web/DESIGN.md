@@ -102,8 +102,9 @@ polling calls to JSON endpoints.
 #### Tab 1 — Users & Orders
 - Table of users from `accounts.yaml`: name, login method, "session valid?"
   hint (derived from whether `.browser_profile/user_<name>` exists).
-- Per-row **"Refresh orders"** button → kicks off `fetch_user_orders` for that
-  user, shows a spinner, then renders the resulting orders below.
+- The combined order cache loads immediately and displays the last update time.
+  It refreshes automatically every day at 08:00 or from the **Refresh orders**
+  button. Each order is a compact card with expandable secondary details.
 
 #### Tab 2 — Run Booking (test / one-off)
 - Form pre-filled from `config/webapp/test/user_config.yaml`:
@@ -142,8 +143,9 @@ polling calls to JSON endpoints.
 
 ### 4. Frontend stack
 
-Server-rendered Jinja2 templates from FastAPI + a small hand-written `app.js`
-(vanilla, no framework) for log/orders polling. Plain CSS. No build step.
+Server-rendered Jinja2 templates from FastAPI + Pico CSS + a small hand-written
+`app.js` for log/orders polling. Pico is vendored locally; there is no build
+step or runtime CDN dependency.
 
 This is a single-user personal tool; the dynamic parts are narrow (poll an
 endpoint, replace innerHTML of one div), so React/Vite would be overkill.
@@ -158,8 +160,8 @@ endpoint, replace innerHTML of one div), so React/Vite would be overkill.
 | GET    | `/run`                   | HTML — Run Booking tab                           |
 | GET    | `/schedule`              | HTML — Scheduled Task tab                        |
 | GET    | `/api/users`             | JSON: users + session-valid hint                 |
-| POST   | `/api/orders/refresh`    | JSON: `{job_id}` (body: `{user, limit}`)         |
-| GET    | `/api/orders/{user}`     | JSON: last cached orders                         |
+| POST   | `/api/orders/refresh_all`| JSON: `{job_id}` (body: `{limit}`)               |
+| GET    | `/api/orders/cache`      | JSON: cached orders + update/scheduler metadata  |
 | POST   | `/api/bookings/run`      | JSON: `{job_id}` (body: worker spec)             |
 | GET    | `/api/jobs/{id}`         | JSON: `{status, logs[], result}`                 |
 | GET    | `/api/schedule/status`   | JSON: `{state, next_fire, no_test_window_active, logs[]}` |
@@ -198,7 +200,7 @@ while True:
 
 ---
 
-### 6. Persistent storage for last-run logs
+### 6. Persistent storage
 
 Minimal, file-based. Two files under `data/` (gitignored):
 
@@ -210,6 +212,10 @@ Minimal, file-based. Two files under `data/` (gitignored):
 
 On webapp startup, the scheduler reads these two files (if present) so the
 "Waiting" view shows the previous run's log even after a restart.
+
+`data/orders_cache.json` stores the most recently fetched combined paid-order
+list, its last successful update, its last attempt, and per-user refresh
+errors. A failed user refresh keeps that user's previous cached orders.
 
 This is intentionally a single-run snapshot, not a history database. If
 multi-run history becomes useful (e.g. weekly success-rate view), the natural

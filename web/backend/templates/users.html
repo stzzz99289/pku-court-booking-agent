@@ -32,14 +32,14 @@
 <section class="panel">
   <div class="section-heading"><div><p class="eyebrow">History</p><h2>Orders</h2></div></div>
   <div class="orders-toolbar">
-    <button class="btn" id="query-orders-btn">Query orders</button>
+    <button class="btn" id="query-orders-btn">Refresh orders</button>
     <label for="venue-filter"><span>Venue filter</span>
     <select id="venue-filter" aria-label="Venue filter">
       <option value="五四体育中心室外网球场" selected>五四体育中心室外网球场</option>
       <option value="">(all venues)</option>
     </select></label>
   </div>
-  <p class="hint">Fetches recent paid orders for every user, newest use date first.</p>
+  <p class="hint orders-cache-note">Automatically refreshed daily at 08:00. <span id="orders-last-update">Loading saved orders…</span></p>
   <div id="orders-status"></div>
   <div class="log-tail" id="orders-log" style="display:none"></div>
   <div id="orders-results"></div>

@@ -1,6 +1,5 @@
-// Vanilla JS — wires up the single "Query orders" button on the Users tab,
-// polls /api/jobs/{id} until the all-users fetch completes, then renders one
-// combined table sorted by use_date descending.
+// Vanilla JS — loads the persistent order cache on the Users tab and polls a
+// background job when the daily or manual refresh is running.
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -15,6 +14,7 @@ document.addEventListener("click", (e) => {
 // venue dropdown re-renders against this in-memory list so toggling the
 // filter is instant and never re-hits the site.
 let lastFetchedOrders = [];
+let ordersPollingJobId = null;
 
 document.addEventListener("change", (e) => {
   const sel = e.target.closest("#venue-filter");
@@ -22,6 +22,7 @@ document.addEventListener("change", (e) => {
 });
 
 function _initOnceReady() {
+  if (document.getElementById("orders-results")) initOrdersTab();
   const form = document.getElementById("booking-form");
   if (form) initBookingForm(form);
   if (document.getElementById("schedule-log")) initScheduleTab();
@@ -30,16 +31,50 @@ function _initOnceReady() {
 // file so that all `const`s (e.g. SCHEDULE_COUNTDOWN_MS) are initialized
 // before init helpers run. See `_runInit` at end of file.
 
+async function initOrdersTab() {
+  await loadOrderCache();
+  setInterval(loadOrderCache, 60_000);
+}
+
+async function loadOrderCache() {
+  const status = document.getElementById("orders-status");
+  try {
+    const response = await fetch("/api/orders/cache");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const cache = await response.json();
+    lastFetchedOrders = cache.orders || [];
+    renderOrderCards(lastFetchedOrders);
+    renderOrderCacheTime(cache.updated_at, cache.errors || []);
+    if (cache.active_job_id && cache.active_job_id !== ordersPollingJobId) {
+      const btn = document.getElementById("query-orders-btn");
+      btn.disabled = true;
+      btn.textContent = "Refreshing…";
+      document.getElementById("orders-log").style.display = "";
+      pollAllOrdersJob(cache.active_job_id, btn);
+    }
+  } catch (err) {
+    status.innerHTML = `<span class="badge err">saved orders unavailable</span>`;
+  }
+}
+
+function renderOrderCacheTime(updatedAt, errors = []) {
+  const target = document.getElementById("orders-last-update");
+  if (!target) return;
+  const timestamp = updatedAt
+    ? new Date(updatedAt * 1000).toLocaleString()
+    : "not refreshed yet";
+  const warning = errors.length ? " · some users could not be refreshed" : "";
+  target.textContent = `Last update: ${timestamp}${warning}`;
+}
+
 async function queryAllOrders(btn) {
   const status = document.getElementById("orders-status");
   const logEl = document.getElementById("orders-log");
-  const resultsEl = document.getElementById("orders-results");
   btn.disabled = true;
   btn.textContent = "Starting…";
   status.innerHTML = `<span class="badge run">running</span>`;
   logEl.style.display = "";
   logEl.textContent = "";
-  resultsEl.innerHTML = "";
   try {
     const resp = await fetch("/api/orders/refresh_all", {
       method: "POST",
@@ -48,13 +83,13 @@ async function queryAllOrders(btn) {
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const {job_id} = await resp.json();
-    btn.textContent = "Running…";
+    btn.textContent = "Refreshing…";
     pollAllOrdersJob(job_id, btn);
   } catch (err) {
     status.innerHTML = `<span class="badge err">failed</span>`;
     logEl.textContent += `[error] ${err.message}\n`;
     btn.disabled = false;
-    btn.textContent = "Query orders";
+    btn.textContent = "Refresh orders";
   }
 }
 
@@ -62,6 +97,7 @@ async function pollAllOrdersJob(jobId, btn) {
   const status = document.getElementById("orders-status");
   const logEl = document.getElementById("orders-log");
   let logOffset = 0;
+  ordersPollingJobId = jobId;
   while (true) {
     let job;
     try {
@@ -80,6 +116,7 @@ async function pollAllOrdersJob(jobId, btn) {
     if (job.status === "succeeded") {
       lastFetchedOrders = job.result?.orders || [];
       renderOrderCards(lastFetchedOrders);
+      renderOrderCacheTime(job.result?.updated_at, job.result?.errors || []);
       break;
     }
     if (job.status === "failed") {
@@ -89,7 +126,8 @@ async function pollAllOrdersJob(jobId, btn) {
     await sleep(POLL_INTERVAL_MS);
   }
   btn.disabled = false;
-  btn.textContent = "Query orders";
+  btn.textContent = "Refresh orders";
+  ordersPollingJobId = null;
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }

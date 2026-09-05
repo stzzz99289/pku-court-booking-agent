@@ -108,6 +108,12 @@ is also greyed (and the API rejects with HTTP 409) while
 with timing + result summary), so the Scheduled Task tab still shows the
 previous run's log after a webapp restart.
 
+**Order cache.** The webapp refreshes all users' paid orders every day at
+08:00 and persists the combined result in `data/orders_cache.json`. The Users
+& Orders tab loads this cache immediately, shows its last update time, and can
+start the same refresh manually. Order refreshes acquire the shared booking
+lock because they reuse the same persistent browser profiles.
+
 ## Selector Discovery Workflow
 
 When CSS/role selectors break or need updating, use `--print-alignment` to get the DevTools MCP checklist, then:

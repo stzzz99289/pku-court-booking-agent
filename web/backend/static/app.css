@@ -207,6 +207,7 @@ table.data tbody tr:hover td { background: rgba(244, 247, 252, 0.65); }
 .orders-toolbar label { min-width: 260px; margin: 0; color: var(--muted); font-size: 0.75rem; font-weight: 650; }
 .orders-toolbar select { height: 42px; margin: 0.25rem 0 0; padding-block: 0.45rem; font-size: 0.82rem; }
 #orders-status { margin-bottom: 0.7rem; }
+.orders-cache-note #orders-last-update { color: var(--text); font-weight: 650; }
 .order-list {
   display: grid;
   gap: 1rem;
@@ -281,14 +282,20 @@ table.data tbody tr:hover td { background: rgba(244, 247, 252, 0.65); }
 }
 .order-details summary::-webkit-details-marker { display: none; }
 .order-details summary::after {
-  padding: 0.2rem 0.48rem;
+  display: inline-grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: 1px solid #ccd9fa;
-  border-radius: 999px;
+  border-radius: 50%;
   background: #fff;
-  content: "Expand";
-  font-size: 0.68rem;
+  content: "⌄";
+  font-size: 1rem;
+  line-height: 1;
 }
-.order-details[open] summary::after { content: "Collapse"; }
+.order-details[open] summary::after { content: "^"; }
 .order-details dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -31,12 +31,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.booking import runner  # noqa: E402
 from src.booking.config import AppConfig  # noqa: E402
-from src.booking.orders import Order, fetch_user_orders  # noqa: E402
 from src.booking.result import BookingResult  # noqa: E402
 from src.booking.site_constants import VENUES  # noqa: E402
 from web.backend import auth as auth_mod  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
 from web.backend.jobs import Job, get_booking_lock, get_job_manager  # noqa: E402
+from web.backend.order_cache import get_order_cache  # noqa: E402
 from web.backend.scheduler import get_scheduler  # noqa: E402
 
 # Deployment mode: "local" (default, 127.0.0.1) or "remote" (behind a TLS
@@ -70,10 +70,13 @@ templates.env.globals["asset_version"] = _asset_version
 async def _lifespan(_: FastAPI):
     auth_mod.load_auth(secure_cookie=(WEBAPP_MODE == "remote"))
     scheduler = get_scheduler()
+    order_cache = get_order_cache()
     await scheduler.start()
+    await order_cache.start()
     try:
         yield
     finally:
+        await order_cache.stop()
         await scheduler.stop()
 
 
@@ -281,43 +284,25 @@ async def api_users() -> JSONResponse:
 
 @app.post("/api/orders/refresh_all")
 async def api_orders_refresh_all(payload: dict[str, Any] | None = None) -> JSONResponse:
-    """Kick off one background job that fetches orders for every user, sequentially.
-
-    Returns the combined list sorted by `use_date` descending. Each user's fetch
-    reuses its persistent browser profile, so this is one-by-one (not parallel).
-    """
+    """Start a manual refresh of the persistent all-user order cache."""
     payload = payload or {}
-    limit = int(payload.get("limit", 10))
+    try:
+        limit = int(payload.get("limit", 10))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit must be an integer")
+    if not 1 <= limit <= 50:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 50")
     base = load_set("test")
     if not base.users:
         raise HTTPException(status_code=400, detail="no users configured")
-
-    async def _fetch_all(job: Job) -> dict[str, Any]:
-        combined: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()  # (user, order_no) — defense in depth
-        for user in base.users:
-            job.append_log(f"[orders] fetching for user={user.name}")
-            cfg = per_user_config(base, user)
-            try:
-                orders: list[Order] = await fetch_user_orders(cfg, user, limit)
-            except Exception as e:
-                job.append_log(f"[orders] {user.name} failed: {type(e).__name__}: {e}")
-                continue
-            added = 0
-            for o in orders:
-                key = (user.name, o.order_no)
-                if not o.order_no or key in seen:
-                    continue
-                seen.add(key)
-                combined.append(o.to_dict())
-                added += 1
-            job.append_log(f"[orders] {user.name}: {added} order(s)")
-        # use_date is an ISO-like string from the site; descending string sort = newest first.
-        combined.sort(key=lambda o: o.get("use_date", ""), reverse=True)
-        return {"count": len(combined), "orders": combined}
-
-    job = get_job_manager().start("orders:all", _fetch_all)
+    job = get_order_cache().start_refresh(limit)
     return JSONResponse({"job_id": job.id})
+
+
+@app.get("/api/orders/cache")
+async def api_orders_cache() -> JSONResponse:
+    """Return cached orders immediately without launching a browser."""
+    return JSONResponse(get_order_cache().status())
 
 
 @app.post("/api/bookings/run")
