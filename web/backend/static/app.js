@@ -109,11 +109,12 @@ function renderCombinedOrdersTable(orders) {
     return;
   }
   const cols = ["user", "order_no", "venue", "use_date", "court_and_time", "amount", "order_status", "created_at"];
-  const head = cols.map((c) => `<th>${c}</th>`).join("");
+  const labels = ["User", "Order", "Venue", "Use date", "Court & time", "Amount", "Status", "Created"];
+  const head = labels.map((label) => `<th>${label}</th>`).join("");
   const rows = filtered.map((o) =>
-    "<tr>" + cols.map((c) => `<td>${escapeHtml(o[c] ?? "")}</td>`).join("") + "</tr>"
+    "<tr>" + cols.map((c, i) => `<td data-label="${labels[i]}">${escapeHtml(o[c] ?? "")}</td>`).join("") + "</tr>"
   ).join("");
-  target.innerHTML = `<table class="data"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  target.innerHTML = `<div class="table-wrap"><table class="data mobile-cards"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function escapeHtml(s) {

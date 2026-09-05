@@ -2,34 +2,34 @@
 {% block title %}Scheduled Task{% endblock %}
 {% block content %}
 <section class="panel">
-  <h2>Scheduled Task <span id="schedule-status-badge" class="badge muted">…</span></h2>
+  <div class="section-heading"><div><p class="eyebrow">Daily automation</p><h2>Scheduled task</h2></div><span id="schedule-status-badge" class="badge muted">…</span></div>
   <p class="hint">A single daily task, always on for the lifetime of this webapp process.
     Edit <code>config/webapp/scheduled/</code> + <code>accounts.yaml</code> and restart to
     reconfigure. Test runs from the Run Booking tab are blocked while this task is running
     or in its prep window.</p>
 
-  <table class="data schedule-meta">
-    <tbody>
-      <tr><th>Submission time</th><td>{{ scheduled_time[0:2] }}:{{ scheduled_time[2:4] }}:{{ scheduled_time[4:6] }}</td></tr>
-      <tr><th>Prep window</th><td>{{ scheduled_prep_seconds }}s before submission</td></tr>
-      <tr><th>Venue</th><td>{% if venue_name %}{{ venue_name }} ({{ venue_id }}){% else %}{{ venue_id or "?" }}{% endif %}</td></tr>
-      <tr><th>Next fire</th><td id="schedule-next-fire">…</td></tr>
-      <tr><th>Countdown</th><td id="schedule-countdown">…</td></tr>
-    </tbody>
-  </table>
+  <div class="metrics-grid">
+    <div class="metric"><span>Submission</span><strong>{{ scheduled_time[0:2] }}:{{ scheduled_time[2:4] }}:{{ scheduled_time[4:6] }}</strong></div>
+    <div class="metric"><span>Prep window</span><strong>{{ scheduled_prep_seconds }}s early</strong></div>
+    <div class="metric metric-wide"><span>Venue</span><strong>{% if venue_name %}{{ venue_name }} ({{ venue_id }}){% else %}{{ venue_id or "?" }}{% endif %}</strong></div>
+    <div class="metric metric-wide"><span>Next fire</span><strong id="schedule-next-fire">…</strong></div>
+    <div class="metric countdown"><span>Countdown</span><strong id="schedule-countdown">…</strong></div>
+  </div>
 
   <h3 class="subhead">Workers ({{ workers|length }})</h3>
   {% if workers %}
-  <table class="data">
+  <div class="table-wrap">
+  <table class="data mobile-cards">
     <thead><tr><th>User</th><th>Date</th><th>Slot priority</th><th>Court priority</th></tr></thead>
     <tbody>
       {% for w in workers %}
-      <tr><td>{{ w.user }}</td><td>{{ w.date }}</td>
-        <td>{% for h in w.start_time_list %}<code class="hour-tag">{{ h }}:00</code>{% endfor %}</td>
-        <td>{% if w.court_priority %}{% for c in w.court_priority %}<code class="hour-tag">#{{ c }}</code>{% endfor %}{% else %}<span class="muted">default</span>{% endif %}</td></tr>
+      <tr><td data-label="User"><strong>{{ w.user }}</strong></td><td data-label="Date">{{ w.date }}</td>
+        <td data-label="Slot priority">{% for h in w.start_time_list %}<code class="hour-tag">{{ h }}:00</code>{% endfor %}</td>
+        <td data-label="Court priority">{% if w.court_priority %}{% for c in w.court_priority %}<code class="hour-tag">#{{ c }}</code>{% endfor %}{% else %}<span class="muted">default</span>{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <p class="hint">Court priority is 0-based court indices (<code>#0</code> = 1号); listed
     courts are preferred first, then the rest in natural order. <span class="muted">default</span>
     = natural order <code>#0, #1, #2, …</code></p>
@@ -39,7 +39,7 @@
 </section>
 
 <section class="panel">
-  <h2>Run log</h2>
+  <div class="section-heading"><div><p class="eyebrow">Latest activity</p><h2>Run log</h2></div></div>
   <p class="hint">Live tail while running; otherwise the previous run's complete log
     (loaded from <code>data/scheduled_last_run.log</code>, persists across restarts).</p>
   <div id="schedule-last-run-summary"></div>

@@ -2,7 +2,7 @@
 {% block title %}Run Booking{% endblock %}
 {% block content %}
 <section class="panel">
-  <h2>Run Booking (test)</h2>
+  <div class="section-heading"><div><p class="eyebrow">Manual test</p><h2>Run booking</h2></div><span class="badge muted">Stops before payment</span></div>
   <p class="hint">Pre-filled from <code>config/webapp/test/user_config.yaml</code>. Always headless;
     the flow stops before payment. The "Run now" button is disabled while the scheduled task is
     running or within its prep window.</p>
@@ -53,9 +53,8 @@
 </section>
 
 <section class="panel">
-  <h2>Live log</h2>
+  <div class="section-heading"><div><p class="eyebrow">Activity</p><h2>Live log</h2></div><div id="run-status" class="run-status"></div></div>
   <p class="hint">Polls <code>/api/jobs/{id}</code> every 1 s. Tail follows new lines automatically.</p>
-  <div id="run-status" class="run-status"></div>
   <div id="run-log" class="log-tail">(no run yet)</div>
   <div id="run-result"></div>
 </section>

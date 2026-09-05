@@ -1,19 +1,30 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
   <title>{% block title %}PKU Court Booking{% endblock %}</title>
+  <link rel="stylesheet" href="/static/vendor/pico.min.css?v={{ asset_version('vendor/pico.min.css') }}">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_version('app.css') }}">
 </head>
 <body>
   <header class="topbar">
-    <h1>PKU Court Booking — Control Panel</h1>
-    <nav class="tabs">
-      <a href="/" class="tab {% if active_tab == 'users' %}active{% endif %}">Users &amp; Orders</a>
-      <a href="/run" class="tab {% if active_tab == 'run' %}active{% endif %}">Run Booking</a>
-      <a href="/schedule" class="tab {% if active_tab == 'schedule' %}active{% endif %}">Scheduled Task</a>
-      <a href="/logout" class="tab logout">Sign out</a>
-    </nav>
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="PKU Court Booking home">
+        <span class="brand-mark" aria-hidden="true">PK</span>
+        <span><strong>PKU Court Booking</strong><small>Control panel</small></span>
+      </a>
+      <nav class="tabs" aria-label="Main navigation">
+        <a href="/" class="tab {% if active_tab == 'users' %}active{% endif %}"
+           {% if active_tab == 'users' %}aria-current="page"{% endif %}><span class="tab-short">Users</span><span class="tab-wide">Users &amp; orders</span></a>
+        <a href="/run" class="tab {% if active_tab == 'run' %}active{% endif %}"
+           {% if active_tab == 'run' %}aria-current="page"{% endif %}><span class="tab-short">Book</span><span class="tab-wide">Run booking</span></a>
+        <a href="/schedule" class="tab {% if active_tab == 'schedule' %}active{% endif %}"
+           {% if active_tab == 'schedule' %}aria-current="page"{% endif %}><span class="tab-short">Schedule</span><span class="tab-wide">Scheduled task</span></a>
+        <a href="/logout" class="tab logout"><span class="tab-short">Exit</span><span class="tab-wide">Sign out</span></a>
+      </nav>
+    </div>
   </header>
   <main class="content">
     {% block content %}{% endblock %}

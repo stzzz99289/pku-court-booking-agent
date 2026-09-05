@@ -2,42 +2,44 @@
 {% block title %}Users &amp; Orders{% endblock %}
 {% block content %}
 <section class="panel">
-  <h2>Users</h2>
+  <div class="section-heading"><div><p class="eyebrow">Accounts</p><h2>Users</h2></div><span class="count-pill">{{ users|length }} configured</span></div>
   <p class="hint">Loaded from <code>accounts.yaml</code>. Session-valid hint comes from
     the modification time of <code>.browser_profile/user_&lt;name&gt;/</code>.</p>
-  <table class="data">
+  <div class="table-wrap">
+  <table class="data mobile-cards">
     <thead>
       <tr><th>Name</th><th>Login method</th><th>Account</th><th>Session</th><th>Last used</th></tr>
     </thead>
     <tbody>
       {% for u in users %}
       <tr data-user="{{ u.name }}">
-        <td>{{ u.name }}</td>
-        <td>{{ u.login_method }}</td>
-        <td>{{ u.account_masked }}</td>
-        <td>
+        <td data-label="Name"><strong>{{ u.name }}</strong></td>
+        <td data-label="Login method">{{ u.login_method }}</td>
+        <td data-label="Account">{{ u.account_masked }}</td>
+        <td data-label="Session">
           {% if u.valid_hint %}<span class="badge ok">likely valid</span>
           {% elif u.exists %}<span class="badge warn">stale</span>
           {% else %}<span class="badge muted">no profile</span>{% endif %}
         </td>
-        <td>{{ u.last_used or "—" }}</td>
+        <td data-label="Last used">{{ u.last_used or "—" }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 
 <section class="panel">
-  <h2>Orders</h2>
-  <p class="hint">
+  <div class="section-heading"><div><p class="eyebrow">History</p><h2>Orders</h2></div></div>
+  <div class="orders-toolbar">
     <button class="btn" id="query-orders-btn">Query orders</button>
-    <label for="venue-filter" style="margin-left: 12px;">Venue filter:</label>
-    <select id="venue-filter">
+    <label for="venue-filter"><span>Venue filter</span>
+    <select id="venue-filter" aria-label="Venue filter">
       <option value="五四体育中心室外网球场" selected>五四体育中心室外网球场</option>
       <option value="">(all venues)</option>
-    </select>
-    <span style="margin-left: 8px;">— fetches recent paid orders for every user (one by one), newest <code>use_date</code> first.</span>
-  </p>
+    </select></label>
+  </div>
+  <p class="hint">Fetches recent paid orders for every user, newest use date first.</p>
   <div id="orders-status"></div>
   <div class="log-tail" id="orders-log" style="display:none"></div>
   <div id="orders-results"></div>
