@@ -155,7 +155,7 @@ function renderOrderCards(orders) {
       <div class="order-primary-info">
         <div>
           <span class="order-field-label">Use date</span>
-          <strong>${escapeHtml(o.use_date ?? "—")}</strong>
+          <strong class="order-date">${escapeHtml(o.use_date ?? "—")}${renderRelativeDateBadge(o.use_date)}</strong>
         </div>
         <div>
           <span class="order-field-label">Court &amp; time</span>
@@ -175,6 +175,26 @@ function renderOrderCards(orders) {
     </article>
   `).join("");
   target.innerHTML = `<div class="order-list">${cards}</div>`;
+}
+
+function renderRelativeDateBadge(useDate) {
+  const orderDate = String(useDate ?? "").replaceAll(/\D/g, "").slice(0, 8);
+  if (orderDate.length !== 8) return "";
+
+  const now = new Date();
+  const today = localDateKey(now);
+  const tomorrow = localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+  if (orderDate === today) return '<span class="date-badge today">Today</span>';
+  if (orderDate === tomorrow) return '<span class="date-badge tomorrow">Tomorrow</span>';
+  return "";
+}
+
+function localDateKey(value) {
+  return [
+    value.getFullYear(),
+    String(value.getMonth() + 1).padStart(2, "0"),
+    String(value.getDate()).padStart(2, "0"),
+  ].join("");
 }
 
 function escapeHtml(s) {
