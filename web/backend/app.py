@@ -233,6 +233,7 @@ async def login_submit(
             status_code=303,
         )
     auth_mod.login_rate_limiter.clear_ip(client_ip)
+    auth_mod.upgrade_file_password_hash(password)
     # Only allow same-origin redirects.
     target = _safe_next(next)
     response = RedirectResponse(url=target, status_code=303)

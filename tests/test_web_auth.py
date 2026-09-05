@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import yaml
 
 from web.backend import auth
 from web.backend import app as webapp
@@ -28,6 +32,27 @@ class PasswordHashTests(unittest.TestCase):
 
     def test_unicode_username_comparison_is_safe(self) -> None:
         self.assertFalse(auth.constant_time_text_equal("用户", "admin"))
+
+    def test_legacy_file_hash_is_upgraded_after_valid_login(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "auth.yaml"
+            legacy = auth._hash_password_pbkdf2("current-password", iterations=1_000)
+            path.write_text(yaml.safe_dump({
+                "username": "admin",
+                "password_hash": legacy,
+                "secret": "test-secret",
+            }), encoding="utf-8")
+            current = auth.AuthConfig("admin", legacy, b"test-secret", False)
+            with (
+                patch.object(auth, "AUTH_YAML", path),
+                patch.object(auth, "_auth", current),
+                patch.dict("os.environ", {}, clear=True),
+            ):
+                self.assertTrue(auth.upgrade_file_password_hash("current-password"))
+
+            stored = yaml.safe_load(path.read_text(encoding="utf-8"))["password_hash"]
+            self.assertTrue(stored.startswith("$argon2id$"))
+            self.assertTrue(auth.verify_password("current-password", stored))
 
 
 class LoginRateLimiterTests(unittest.TestCase):

@@ -109,6 +109,9 @@ $EDITOR config/webapp/auth.yaml
 machines. The generated password hash uses memory-hard Argon2id; the plaintext
 dashboard password is never stored. Older PBKDF2 hashes still work so existing
 installations can migrate without being locked out.
+For file-based configuration, the first successful login after upgrading the
+webapp automatically replaces a legacy PBKDF2 hash with Argon2id. Environment-
+managed hashes must be replaced manually.
 
 **Option B — environment variables (recommended for systemd / containers).**
 

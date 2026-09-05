@@ -204,6 +204,51 @@ class LoginRateLimiter:
 
 
 login_rate_limiter = LoginRateLimiter()
+_hash_upgrade_lock = threading.Lock()
+
+
+def upgrade_file_password_hash(password: str) -> bool:
+    """Atomically upgrade a legacy auth.yaml hash after a valid login.
+
+    Environment-managed hashes cannot be persisted by the app and must be
+    rotated by the deployment system instead.
+    """
+    auth = get_auth()
+    if not password_hash_needs_upgrade(auth.password_hash):
+        return False
+    if os.environ.get("WEBAPP_PASSWORD_HASH"):
+        log.warning("legacy WEBAPP_PASSWORD_HASH must be upgraded by the deployment owner")
+        return False
+
+    with _hash_upgrade_lock:
+        if not password_hash_needs_upgrade(auth.password_hash):
+            return False
+        try:
+            with AUTH_YAML.open("r", encoding="utf-8") as stream:
+                data = yaml.safe_load(stream) or {}
+            if str(data.get("password_hash", "")) != auth.password_hash:
+                log.warning("auth.yaml changed during password-hash upgrade; leaving it untouched")
+                return False
+
+            upgraded = hash_password(password)
+            data["password_hash"] = upgraded
+            temp_path = AUTH_YAML.with_name(f".{AUTH_YAML.name}.{secrets.token_hex(8)}.tmp")
+            descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump(data, stream, sort_keys=False, allow_unicode=True)
+                os.replace(temp_path, AUTH_YAML)
+                if os.name == "posix":
+                    AUTH_YAML.chmod(0o600)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        except OSError:
+            log.exception("could not persist the upgraded dashboard password hash")
+            return False
+
+        auth.password_hash = upgraded
+        log.info("dashboard password hash upgraded to Argon2id")
+        return True
 
 
 # ---------------------------------------------------------------------------
