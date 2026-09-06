@@ -109,7 +109,13 @@ async def _redirect_handler(_: Request, exc: auth_mod._RedirectException):
 
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+    # Login has no authenticated state to protect and some mobile/embedded
+    # browsers send a rewritten or ``null`` Origin for its form POST. Keep the
+    # origin gate on every authenticated state-changing endpoint.
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path != "/login"
+    ):
         origin = request.headers.get("origin")
         if origin and not _same_request_host(request, origin):
             return _security_headers(

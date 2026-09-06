@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from web.backend import auth
@@ -126,6 +127,27 @@ class PublicUserPayloadTests(unittest.TestCase):
         self.assertTrue(
             webapp._same_request_host(request, "https://booking.example.com")
         )
+
+    def test_login_post_allows_mobile_null_origin(self) -> None:
+        previous = auth._auth
+        auth._auth = auth.AuthConfig(
+            "admin",
+            auth.hash_password("a unique test passphrase"),
+            b"test-session-secret",
+            False,
+        )
+        try:
+            client = TestClient(webapp.app)
+            response = client.post(
+                "/login",
+                headers={"origin": "null"},
+                data={"username": "wrong", "password": "wrong", "next": "/"},
+                follow_redirects=False,
+            )
+        finally:
+            auth._auth = previous
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("error=invalid", response.headers["location"])
 
     def test_job_api_payload_redacts_registered_booking_secrets(self) -> None:
         configure_secret_redaction(["15500001111", "court-secret"])
