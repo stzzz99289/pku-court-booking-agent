@@ -111,7 +111,7 @@ async def _redirect_handler(_: Request, exc: auth_mod._RedirectException):
 async def _auth_middleware(request: Request, call_next):
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         origin = request.headers.get("origin")
-        if origin and urlsplit(origin).netloc != request.headers.get("host", ""):
+        if origin and not _same_request_host(request, origin):
             return _security_headers(
                 request,
                 JSONResponse({"detail": "cross-origin request rejected"}, status_code=403),
@@ -126,6 +126,26 @@ async def _auth_middleware(request: Request, call_next):
         )
     response = await call_next(request)
     return _security_headers(request, response)
+
+
+def _same_request_host(request: Request, origin: str) -> bool:
+    """Accept browser writes from this host, tolerating proxy/port rewriting."""
+    origin_host = (urlsplit(origin).hostname or "").lower().rstrip(".")
+    if not origin_host:
+        return False
+
+    candidate_headers = [request.headers.get("host", "")]
+    # A reverse proxy may expose the public phone-facing host here while the
+    # ASGI Host header contains its upstream address.
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    if forwarded_host:
+        candidate_headers.append(forwarded_host)
+
+    for value in candidate_headers:
+        candidate = (urlsplit(f"//{value}").hostname or "").lower().rstrip(".")
+        if candidate and auth_mod.constant_time_text_equal(origin_host, candidate):
+            return True
+    return False
 
 
 def _security_headers(request: Request, response):

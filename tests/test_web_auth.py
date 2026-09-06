@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
+from starlette.requests import Request
 
 from web.backend import auth
 from web.backend import app as webapp
@@ -97,6 +98,34 @@ class PublicUserPayloadTests(unittest.TestCase):
         self.assertEqual(webapp._safe_next("//example.com"), "/")
         self.assertEqual(webapp._safe_next("https://example.com"), "/")
         self.assertEqual(webapp._safe_next("/schedule"), "/schedule")
+
+    def test_origin_check_tolerates_port_rewriting(self) -> None:
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/login",
+            "headers": [(b"host", b"43.173.124.100")],
+        })
+        self.assertTrue(
+            webapp._same_request_host(request, "http://43.173.124.100:18000")
+        )
+        self.assertFalse(webapp._same_request_host(request, "https://evil.example"))
+
+    def test_origin_check_accepts_public_forwarded_host(self) -> None:
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/login",
+            "headers": [
+                (b"host", b"127.0.0.1:18000"),
+                (b"x-forwarded-host", b"booking.example.com"),
+            ],
+        })
+        self.assertTrue(
+            webapp._same_request_host(request, "https://booking.example.com")
+        )
 
     def test_job_api_payload_redacts_registered_booking_secrets(self) -> None:
         configure_secret_redaction(["15500001111", "court-secret"])
