@@ -8,6 +8,10 @@ const POLL_INTERVAL_MS = 1000;
 document.addEventListener("click", (e) => {
   const queryBtn = e.target.closest("#query-orders-btn");
   if (queryBtn) queryAllOrders(queryBtn);
+  const proofBtn = e.target.closest(".order-proof-preview");
+  if (proofBtn) showProofDialog(proofBtn);
+  const closeBtn = e.target.closest(".proof-dialog-close");
+  if (closeBtn) closeProofDialog();
 });
 
 // Last fetched orders from the most recent /api/orders/refresh_all run; the
@@ -162,6 +166,7 @@ function renderOrderCards(orders) {
           <strong>${escapeHtml(o.court_and_time ?? "—")}</strong>
         </div>
       </div>
+      ${renderOrderProof(o)}
       <details class="order-details">
         <summary>Other information</summary>
         <dl>
@@ -176,6 +181,42 @@ function renderOrderCards(orders) {
   `).join("");
   target.innerHTML = `<div class="order-list">${cards}</div>`;
 }
+
+function renderOrderProof(order) {
+  if (!order.proof_url) {
+    return '<p class="order-proof-missing">Proof screenshot unavailable</p>';
+  }
+  const url = escapeHtml(order.proof_url);
+  const orderNo = escapeHtml(order.order_no ?? "");
+  return `<button type="button" class="order-proof-preview"
+      data-proof-url="${url}" data-order-no="${orderNo}"
+      aria-label="View proof screenshot for order ${orderNo}">
+    <img src="${url}" alt="Proof screenshot for order ${orderNo}" loading="lazy">
+    <span>Tap to view full screen</span>
+  </button>`;
+}
+
+function showProofDialog(button) {
+  const dialog = document.getElementById("proof-dialog");
+  const image = document.getElementById("proof-dialog-image");
+  const caption = document.getElementById("proof-dialog-caption");
+  if (!dialog || !image || !caption) return;
+  const orderNo = button.dataset.orderNo || "";
+  image.src = button.dataset.proofUrl || "";
+  image.alt = `Proof screenshot for order ${orderNo}`;
+  caption.textContent = orderNo ? `Order ${orderNo}` : "Booking proof";
+  dialog.showModal();
+}
+
+function closeProofDialog() {
+  const dialog = document.getElementById("proof-dialog");
+  if (dialog?.open) dialog.close();
+}
+
+document.addEventListener("click", (event) => {
+  const dialog = event.target.closest("#proof-dialog");
+  if (dialog && event.target === dialog) closeProofDialog();
+});
 
 function renderRelativeDateBadge(useDate) {
   const orderDate = String(useDate ?? "").replaceAll(/\D/g, "").slice(0, 8);

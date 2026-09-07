@@ -32,8 +32,9 @@ Thumbs.db
 # data
 data/
 
-# post-submit diagnostic dumps
-debugging/
+# Local diagnostics and captured study artifacts (keep the folder guide only)
+debugging/**
+!debugging/README.md
 
 # claude info
 .claude/

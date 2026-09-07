@@ -58,7 +58,7 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
             users = [SimpleNamespace(name="stz"), SimpleNamespace(name="zy")]
             base = SimpleNamespace(users=users)
 
-            async def fake_fetch(_cfg, user, _limit):
+            async def fake_fetch(_cfg, user, _limit, **_kwargs):
                 if user.name == "zy":
                     raise RuntimeError("temporary failure")
                 return [Order(

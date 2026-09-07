@@ -16,9 +16,11 @@
         <td data-label="Name"><strong>{{ u.name }}</strong></td>
         <td data-label="Login method">{{ u.login_method }}</td>
         <td data-label="Session">
-          {% if u.valid_hint %}<span class="badge ok">likely valid</span>
-          {% elif u.exists %}<span class="badge warn">stale</span>
-          {% else %}<span class="badge muted">no profile</span>{% endif %}
+          <span class="cell-value">
+            {% if u.valid_hint %}<span class="badge ok">likely valid</span>
+            {% elif u.exists %}<span class="badge warn">stale</span>
+            {% else %}<span class="badge muted">no profile</span>{% endif %}
+          </span>
         </td>
         <td data-label="Last used">{{ u.last_used or "—" }}</td>
       </tr>
@@ -43,4 +45,15 @@
   <div class="log-tail" id="orders-log" style="display:none"></div>
   <div id="orders-results"></div>
 </section>
+
+<dialog id="proof-dialog" class="proof-dialog" aria-labelledby="proof-dialog-title">
+  <div class="proof-dialog-bar">
+    <strong id="proof-dialog-title">Booking proof</strong>
+    <button type="button" class="proof-dialog-close" aria-label="Close proof screenshot">×</button>
+  </div>
+  <div class="proof-dialog-body">
+    <img id="proof-dialog-image" alt="">
+  </div>
+  <p id="proof-dialog-caption" class="proof-dialog-caption"></p>
+</dialog>
 {% endblock %}

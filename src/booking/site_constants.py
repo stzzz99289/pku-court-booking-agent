@@ -12,6 +12,11 @@ from __future__ import annotations
 
 BASE_URL = "https://epe.pku.edu.cn/venue/home"
 
+# The site ships a dedicated mobile order-card route. Merely narrowing the
+# desktop /orders page retains its horizontally scrolling table.
+MOBILE_ORDERS_PATH = "/venue/mobileOrders"
+MOBILE_ORDER_CARD_SELECTOR = "li.buddyItem"
+
 # Known venues, keyed by the numeric ID in
 # https://epe.pku.edu.cn/venue/venue-reservation/<id>. The webapp uses these
 # names in its UI; YAML configs keep the integer ID as the source of truth.

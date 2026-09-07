@@ -112,7 +112,11 @@ previous run's log after a webapp restart.
 08:00 and persists the combined result in `data/orders_cache.json`. The Users
 & Orders tab loads this cache immediately, shows its last update time, and can
 start the same refresh manually. Order refreshes acquire the shared booking
-lock because they reuse the same persistent browser profiles.
+lock because they reuse the same persistent browser profiles. During a refresh,
+current and future normal paid orders receive mobile-card proof screenshots in
+`data/order_proofs/`. The `(user, order_no)` index prevents recapture on manual
+refreshes; proofs whose use date is before today are removed at the start of
+the next refresh. Images are exposed only through the authenticated webapp.
 
 ## Selector Discovery Workflow
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 # Transient navigation errors that warrant one retry (mirror of runner.py's set).
@@ -120,7 +120,13 @@ async def _scrape_orders_table(page: Page, user: str) -> list[Order]:
     return out
 
 
-async def fetch_user_orders(cfg: AppConfig, user: UserConfig, limit: int) -> list[Order]:
+async def fetch_user_orders(
+    cfg: AppConfig,
+    user: UserConfig,
+    limit: int,
+    *,
+    after_fetch: Callable[[Page, list[Order]], Awaitable[None]] | None = None,
+) -> list[Order]:
     """Login as `user`, navigate to /venue/orders, return up to `limit` paid orders (newest first)."""
     solver = ManualCaptchaSolver() if cfg.debug else _default_login_solver()
     context, _ = await launch_persistent_context(cfg)
@@ -148,7 +154,10 @@ async def fetch_user_orders(cfg: AppConfig, user: UserConfig, limit: int) -> lis
         except Exception:
             log.warning("Orders table did not render within 10 s for user %s.", user.name)
             return []
-        return await _collect_paid_orders(page, user.name, limit)
+        orders = await _collect_paid_orders(page, user.name, limit)
+        if after_fetch is not None:
+            await after_fetch(page, orders)
+        return orders
     finally:
         await dispose_context(context)
 

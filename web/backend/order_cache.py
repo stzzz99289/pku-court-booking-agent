@@ -12,12 +12,17 @@ from typing import Any
 from src.booking.orders import Order, fetch_user_orders
 from web.backend.config_loader import load_set, per_user_config
 from web.backend.jobs import Job, get_booking_lock, get_job_manager
+from web.backend.order_proofs import (
+    OrderProofStore,
+    capture_missing_order_proofs,
+)
 
 log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 ORDER_CACHE_FILE = DATA_DIR / "orders_cache.json"
+ORDER_PROOF_DIR = DATA_DIR / "order_proofs"
 ORDER_REFRESH_HOUR = 8
 DEFAULT_ORDER_LIMIT = 10
 
@@ -34,8 +39,13 @@ def compute_next_order_refresh(now: datetime | None = None) -> float:
 class OrderCacheService:
     """Own the durable cache and its lightweight daily scheduler."""
 
-    def __init__(self, cache_file: Path = ORDER_CACHE_FILE) -> None:
+    def __init__(
+        self,
+        cache_file: Path = ORDER_CACHE_FILE,
+        proof_dir: Path | None = None,
+    ) -> None:
         self.cache_file = cache_file
+        self.proofs = OrderProofStore(proof_dir or cache_file.parent / "order_proofs")
         self.task: asyncio.Task | None = None
         self.next_refresh: float | None = None
         self.current_job_id: str | None = None
@@ -77,6 +87,7 @@ class OrderCacheService:
 
     def status(self) -> dict[str, Any]:
         data = self.load_cache()
+        data["orders"] = self.proofs.attach_urls(data["orders"])
         active_job_id: str | None = None
         if self.current_job_id:
             job = get_job_manager().get(self.current_job_id)
@@ -125,6 +136,9 @@ class OrderCacheService:
             raise RuntimeError("no users configured")
 
         previous = self.load_cache()
+        pruned = self.proofs.prune_past()
+        if pruned:
+            job.append_log(f"[orders] removed {pruned} expired proof screenshot(s)")
         previous_by_user: dict[str, list[dict[str, Any]]] = {}
         for order in previous["orders"]:
             previous_by_user.setdefault(str(order.get("user", "")), []).append(order)
@@ -140,7 +154,23 @@ class OrderCacheService:
                 job.append_log(f"[orders] fetching for user={user.name}")
                 cfg = per_user_config(base, user)
                 try:
-                    orders: list[Order] = await fetch_user_orders(cfg, user, limit)
+                    async def _capture(page, fetched_orders: list[Order]) -> None:
+                        try:
+                            stats = await capture_missing_order_proofs(
+                                page, cfg.base_url, fetched_orders, self.proofs,
+                            )
+                            job.append_log(
+                                f"[proofs] {user.name}: {stats['captured']} captured, "
+                                f"{stats['cached']} cached, {stats['failed']} failed"
+                            )
+                        except Exception as exc:
+                            job.append_log(
+                                f"[proofs] {user.name}: {type(exc).__name__}: {exc}"
+                            )
+
+                    orders: list[Order] = await fetch_user_orders(
+                        cfg, user, limit, after_fetch=_capture,
+                    )
                     user_orders = [order.to_dict() for order in orders]
                     successful_users += 1
                 except Exception as exc:
@@ -170,6 +200,7 @@ class OrderCacheService:
             "errors": errors,
             "count": len(combined),
         }
+        result["orders"] = self.proofs.attach_urls(result["orders"])
         self._write_cache(result)
         log.info(
             "order cache: refresh finished; %d/%d user(s) succeeded, %d order(s).",

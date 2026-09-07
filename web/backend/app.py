@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -392,6 +392,29 @@ async def api_orders_refresh_all(payload: dict[str, Any] | None = None) -> JSONR
 async def api_orders_cache() -> JSONResponse:
     """Return cached orders immediately without launching a browser."""
     return JSONResponse(get_order_cache().status())
+
+
+@app.get("/api/orders/proof")
+async def api_order_proof(user: str, order_no: str) -> FileResponse:
+    """Serve a cached proof only while its order remains in the visible cache."""
+    service = get_order_cache()
+    visible = any(
+        str(order.get("user", "")) == user
+        and str(order.get("order_no", "")) == order_no
+        for order in service.load_cache().get("orders", [])
+    )
+    if not visible:
+        raise HTTPException(status_code=404, detail="proof screenshot not found")
+    path = service.proofs.cached_path(user, order_no)
+    if path is None:
+        raise HTTPException(status_code=404, detail="proof screenshot not found")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        filename="order-proof.png",
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.post("/api/bookings/run")
