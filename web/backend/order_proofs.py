@@ -25,10 +25,6 @@ PROOF_VIEWPORT = {"width": 390, "height": 844}
 PAID_STATUS = "已支付"
 NORMAL_STATUS = "正常"
 _LOAD_MORE_TEXT = "加载更多"
-_CJK_FONT_STACK = (
-    '"Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", '
-    '"PingFang SC", sans-serif'
-)
 
 
 def _assert_cjk_font_available() -> None:
@@ -247,10 +243,6 @@ async def capture_missing_order_proofs(
     try:
         await page.set_viewport_size(PROOF_VIEWPORT)
         await page.goto(_mobile_orders_url(base_url), wait_until="domcontentloaded")
-        await page.add_style_tag(content=(
-            f"{MOBILE_ORDER_CARD_SELECTOR}, {MOBILE_ORDER_CARD_SELECTOR} * "
-            f"{{ font-family: {_CJK_FONT_STACK} !important; }}"
-        ))
         await page.evaluate("async () => { await document.fonts.ready; }")
         await page.locator(MOBILE_ORDER_CARD_SELECTOR).first.wait_for(
             state="visible", timeout=10_000,

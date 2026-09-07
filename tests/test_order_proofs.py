@@ -112,9 +112,6 @@ class OrderProofCaptureTests(unittest.IsolatedAsyncioTestCase):
             async def goto(self, url, **_kwargs):
                 self.visited = url
 
-            async def add_style_tag(self, **_kwargs):
-                return None
-
             async def evaluate(self, _expression):
                 return None
 
