@@ -4,9 +4,15 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.booking.orders import Order
-from web.backend.order_proofs import OrderProofStore, capture_missing_order_proofs
+from web.backend.order_proofs import (
+    OrderProofStore,
+    _assert_cjk_font_available,
+    capture_missing_order_proofs,
+)
 
 
 def _order(order_no: str, use_date: str) -> Order:
@@ -64,6 +70,18 @@ class OrderProofStoreTests(unittest.TestCase):
 
 
 class OrderProofCaptureTests(unittest.IsolatedAsyncioTestCase):
+    def test_linux_capture_rejects_missing_chinese_fonts(self) -> None:
+        with (
+            patch("web.backend.order_proofs.sys.platform", "linux"),
+            patch("web.backend.order_proofs.shutil.which", return_value="fc-list"),
+            patch(
+                "web.backend.order_proofs.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout=b""),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no Chinese font"):
+                _assert_cjk_font_available()
+
     async def test_missing_proof_is_captured_from_mobile_card(self) -> None:
         class Card:
             async def wait_for(self, **_kwargs):
@@ -94,6 +112,12 @@ class OrderProofCaptureTests(unittest.IsolatedAsyncioTestCase):
             async def goto(self, url, **_kwargs):
                 self.visited = url
 
+            async def add_style_tag(self, **_kwargs):
+                return None
+
+            async def evaluate(self, _expression):
+                return None
+
             def locator(self, _selector):
                 return Locator(self.card)
 
@@ -102,13 +126,14 @@ class OrderProofCaptureTests(unittest.IsolatedAsyncioTestCase):
             order = _order("NEW", "2026-09-08")
             page = Page()
 
-            stats = await capture_missing_order_proofs(
-                page,
-                "https://epe.pku.edu.cn/venue/home",
-                [order],
-                store,
-                today=date(2026, 9, 7),
-            )
+            with patch("web.backend.order_proofs._assert_cjk_font_available"):
+                stats = await capture_missing_order_proofs(
+                    page,
+                    "https://epe.pku.edu.cn/venue/home",
+                    [order],
+                    store,
+                    today=date(2026, 9, 7),
+                )
 
             self.assertEqual(stats, {"captured": 1, "cached": 0, "failed": 0})
             self.assertEqual(page.visited, "https://epe.pku.edu.cn/venue/mobileOrders")

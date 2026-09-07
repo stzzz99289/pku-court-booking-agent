@@ -11,6 +11,8 @@ Automated court booking agent for Peking University's venue reservation system (
 ```bash
 pip install -r requirements.txt
 playwright install chromium
+# Linux: required for readable Chinese text in order-proof screenshots
+sudo apt install fonts-noto-cjk
 cp config/cli/user_config.example.yaml config/cli/user_config.yaml  # fill in
 python main.py
 ```

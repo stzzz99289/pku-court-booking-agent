@@ -10,6 +10,10 @@ particular box.
 - Project root on server: `~/pku-court-booking-agent`
 - Python venv on server: `~/pku-court-booking-agent/.venv` (Python 3.12)
 - Playwright Chromium installed in `~/.cache/ms-playwright/chromium*`
+- Noto CJK fonts available to the service account; proof capture refuses to
+  cache screenshots on Linux when `fc-list :lang=zh` reports no fonts. Install
+  system-wide with `sudo apt install fonts-noto-cjk`, or place the package's
+  font files under `~/.local/share/fonts/` and run `fc-cache -f`.
 
 ## Dashboard URL
 

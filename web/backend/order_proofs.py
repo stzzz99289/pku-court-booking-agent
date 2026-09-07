@@ -6,6 +6,9 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,31 @@ PROOF_VIEWPORT = {"width": 390, "height": 844}
 PAID_STATUS = "已支付"
 NORMAL_STATUS = "正常"
 _LOAD_MORE_TEXT = "加载更多"
+_CJK_FONT_STACK = (
+    '"Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", '
+    '"PingFang SC", sans-serif'
+)
+
+
+def _assert_cjk_font_available() -> None:
+    """Fail before caching tofu-box screenshots on Linux hosts."""
+    fc_list = shutil.which("fc-list")
+    if not sys.platform.startswith("linux") or fc_list is None:
+        return
+    try:
+        result = subprocess.run(
+            [fc_list, ":lang=zh"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not inspect installed fonts: {exc}") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(
+            "no Chinese font is installed; install fonts-noto-cjk before "
+            "capturing order proofs"
+        )
 
 
 def _date_value(value: str) -> date | None:
@@ -212,12 +240,18 @@ async def capture_missing_order_proofs(
     if not missing:
         return {"captured": 0, "cached": len(candidates), "failed": 0}
 
+    _assert_cjk_font_available()
     old_viewport = page.viewport_size
     captured = 0
     failed = 0
     try:
         await page.set_viewport_size(PROOF_VIEWPORT)
         await page.goto(_mobile_orders_url(base_url), wait_until="domcontentloaded")
+        await page.add_style_tag(content=(
+            f"{MOBILE_ORDER_CARD_SELECTOR}, {MOBILE_ORDER_CARD_SELECTOR} * "
+            f"{{ font-family: {_CJK_FONT_STACK} !important; }}"
+        ))
+        await page.evaluate("async () => { await document.fonts.ready; }")
         await page.locator(MOBILE_ORDER_CARD_SELECTOR).first.wait_for(
             state="visible", timeout=10_000,
         )

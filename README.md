@@ -23,6 +23,9 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium
 
+# Linux servers also need a Chinese font for order-proof screenshots.
+sudo apt install fonts-noto-cjk
+
 # 4. fill in your credentials and booking targets — see "Configuration" below
 cp config/cli/user_config.example.yaml      config/cli/user_config.yaml
 cp config/webapp/accounts.example.yaml      config/webapp/accounts.yaml
