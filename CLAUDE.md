@@ -120,6 +120,12 @@ current and future normal paid orders receive mobile-card proof screenshots in
 refreshes; proofs whose use date is before today are removed at the start of
 the next refresh. Images are exposed only through the authenticated webapp.
 
+**Session verification.** The Users tab shows the last time the live site
+accepted each account's session. Successful fresh logins and confirmed access
+to protected reservation/order pages touch a marker inside that user's
+persistent browser profile. This is historical evidence, not a prediction of
+future session validity; the booking flow still re-authenticates when needed.
+
 ## Selector Discovery Workflow
 
 When CSS/role selectors break or need updating, use `--print-alignment` to get the DevTools MCP checklist, then:

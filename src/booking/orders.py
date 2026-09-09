@@ -45,6 +45,7 @@ from .browser import dispose_context, launch_persistent_context
 from .captcha import ManualCaptchaSolver
 from .config import AppConfig, UserConfig
 from .login import ensure_logged_in
+from .session_verification import mark_session_verified
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ async def fetch_user_orders(
         except Exception:
             log.warning("Orders table did not render within 10 s for user %s.", user.name)
             return []
+        mark_session_verified(cfg.user_data_dir)
         orders = await _collect_paid_orders(page, user.name, limit)
         if after_fetch is not None:
             await after_fetch(page, orders)

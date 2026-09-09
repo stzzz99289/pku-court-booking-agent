@@ -7,6 +7,7 @@ from playwright.async_api import Page
 
 from .captcha import CaptchaSolver, solve_and_fill
 from .config import AppConfig
+from .session_verification import mark_session_verified
 
 log = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ async def _iaaa_login(page: Page, cfg: AppConfig) -> None:
             "Student login was not accepted; check the user ID/password or the IAAA page."
         ) from exc
     await page.wait_for_load_state("domcontentloaded")
+    mark_session_verified(cfg.user_data_dir)
 
 
 async def _alumni_login(page: Page, cfg: AppConfig, solver: CaptchaSolver) -> None:
@@ -241,6 +243,7 @@ async def _alumni_login(page: Page, cfg: AppConfig, solver: CaptchaSolver) -> No
         await page.locator(submit_sel).first.click()
         if await _login_redirected(page):
             await page.wait_for_load_state("domcontentloaded")
+            mark_session_verified(cfg.user_data_dir)
             return
 
         error_text = await _read_login_error(page, cfg)

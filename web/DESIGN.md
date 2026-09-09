@@ -100,8 +100,8 @@ template. Live regions (log panels, order tables) refresh via small `fetch()`
 polling calls to JSON endpoints.
 
 #### Tab 1 — Users & Orders
-- Table of users from `accounts.yaml`: name, login method, "session valid?"
-  hint (derived from whether `.browser_profile/user_<name>` exists).
+- Table of users from `accounts.yaml`: name, login method, and the last time
+  the live site explicitly accepted that user's session.
 - The combined order cache loads immediately and displays the last update time.
   It refreshes automatically every day at 08:00 or from the **Refresh orders**
   button. Each order is a compact card with expandable secondary details.
@@ -159,7 +159,7 @@ endpoint, replace innerHTML of one div), so React/Vite would be overkill.
 | GET    | `/`                      | HTML — Users & Orders tab                        |
 | GET    | `/run`                   | HTML — Run Booking tab                           |
 | GET    | `/schedule`              | HTML — Scheduled Task tab                        |
-| GET    | `/api/users`             | JSON: users + session-valid hint                 |
+| GET    | `/api/users`             | JSON: users + last session verification time    |
 | POST   | `/api/orders/refresh_all`| JSON: `{job_id}` (body: `{limit}`)               |
 | GET    | `/api/orders/cache`      | JSON: cached orders + update/scheduler metadata  |
 | POST   | `/api/bookings/run`      | JSON: `{job_id}` (body: worker spec)             |

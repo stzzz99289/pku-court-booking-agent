@@ -14,7 +14,6 @@ import copy
 import logging
 import os
 import sys
-import time
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
@@ -33,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.booking import runner  # noqa: E402
 from src.booking.config import AppConfig  # noqa: E402
 from src.booking.result import BookingResult  # noqa: E402
+from src.booking.session_verification import last_session_verified  # noqa: E402
 from src.booking.site_constants import VENUES  # noqa: E402
 from web.backend import auth as auth_mod  # noqa: E402
 from web.backend.config_loader import load_set, per_user_config  # noqa: E402
@@ -176,35 +176,19 @@ def _security_headers(request: Request, response):
 # ---------------------------------------------------------------------------
 
 
-def _session_valid_hint(user_data_dir: Path) -> dict[str, Any]:
-    """Crude "session likely valid" hint based on profile dir mtime.
-
-    True iff the per-user profile dir exists and was modified in the last 7 days.
-    Real session validity can only be confirmed by hitting the site, which we
-    intentionally avoid here (no background browser launches on page load).
-    """
-    if not user_data_dir.is_dir():
-        return {"exists": False, "valid_hint": False, "last_used": None}
-    mtime = user_data_dir.stat().st_mtime
-    age_days = (time.time() - mtime) / 86400
-    return {
-        "exists": True,
-        "valid_hint": age_days < 7,
-        "last_used": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
-    }
-
-
 def _users_payload() -> list[dict[str, Any]]:
     """Return an allowlisted public view; never expose booking credentials."""
     cfg = load_set("test")  # accounts.yaml is shared across both sets
     base_profile = Path(cfg.user_data_dir).resolve()
     out: list[dict[str, Any]] = []
     for u in cfg.users:
-        hint = _session_valid_hint(base_profile / f"user_{u.name}")
+        verified_at = last_session_verified(base_profile / f"user_{u.name}")
         out.append({
             "name": u.name,
             "login_method": u.login_method,
-            **hint,
+            "last_verified": (
+                verified_at.strftime("%Y-%m-%d %H:%M") if verified_at else None
+            ),
         })
     return out
 

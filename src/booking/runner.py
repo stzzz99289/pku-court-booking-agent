@@ -25,6 +25,7 @@ from .login import ensure_logged_in, session_token_expired
 from .orders import Order, fetch_user_orders, format_orders_table
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
 from .result import BookingResult
+from .session_verification import mark_session_verified
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +102,8 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
             log.info("Re-navigating to venue reservation after forced re-login.")
             await _goto_with_retry(page, url)
             log.info("Landed on: %s", page.url)
-        await _ensure_date_buttons_visible(page)
+        if await _ensure_date_buttons_visible(page):
+            mark_session_verified(cfg.user_data_dir)
         return  # Already logged in (or just re-logged-in).
     log.info("'Please login' modal detected — dismissing and re-authenticating.")
     await page.get_by_role("button", name="确定").first.click()
@@ -109,7 +111,8 @@ async def _navigate_to_reservation(page, cfg: AppConfig, login_solver) -> None:
     log.info("Re-navigating to venue reservation after login.")
     await _goto_with_retry(page, url)
     log.info("Landed on: %s", page.url)
-    await _ensure_date_buttons_visible(page)
+    if await _ensure_date_buttons_visible(page):
+        mark_session_verified(cfg.user_data_dir)
 
 
 # Date-buttons retry budget — kept tight so the happy path (Vue renders in

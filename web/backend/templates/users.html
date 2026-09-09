@@ -3,26 +3,19 @@
 {% block content %}
 <section class="panel">
   <div class="section-heading"><div><p class="eyebrow">Accounts</p><h2>Users</h2></div><span class="count-pill">{{ users|length }} configured</span></div>
-  <p class="hint">Loaded from <code>accounts.yaml</code>. Session-valid hint comes from
-    the modification time of <code>.browser_profile/user_&lt;name&gt;/</code>.</p>
+  <p class="hint">Loaded from <code>accounts.yaml</code>. “Last verified” is updated when
+    the booking site confirms that the account is signed in.</p>
   <div class="table-wrap">
   <table class="data mobile-cards">
     <thead>
-      <tr><th>Name</th><th>Login method</th><th>Session</th><th>Last used</th></tr>
+      <tr><th>Name</th><th>Login method</th><th>Last verified</th></tr>
     </thead>
     <tbody>
       {% for u in users %}
       <tr data-user="{{ u.name }}">
         <td data-label="Name"><strong>{{ u.name }}</strong></td>
         <td data-label="Login method">{{ u.login_method }}</td>
-        <td data-label="Session">
-          <span class="cell-value">
-            {% if u.valid_hint %}<span class="badge ok">likely valid</span>
-            {% elif u.exists %}<span class="badge warn">stale</span>
-            {% else %}<span class="badge muted">no profile</span>{% endif %}
-          </span>
-        </td>
-        <td data-label="Last used">{{ u.last_used or "—" }}</td>
+        <td data-label="Last verified">{{ u.last_verified or "Not yet verified" }}</td>
       </tr>
       {% endfor %}
     </tbody>

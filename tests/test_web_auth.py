@@ -79,11 +79,7 @@ class PublicUserPayloadTests(unittest.TestCase):
         cfg = SimpleNamespace(users=[user], user_data_dir=".browser_profile")
         with (
             patch("web.backend.app.load_set", return_value=cfg),
-            patch("web.backend.app._session_valid_hint", return_value={
-                "exists": False,
-                "valid_hint": False,
-                "last_used": None,
-            }),
+            patch("web.backend.app.last_session_verified", return_value=None),
         ):
             payload = webapp._users_payload()
 
@@ -92,7 +88,7 @@ class PublicUserPayloadTests(unittest.TestCase):
         self.assertNotIn(user.password, rendered)
         self.assertEqual(
             set(payload[0]),
-            {"name", "login_method", "exists", "valid_hint", "last_used"},
+            {"name", "login_method", "last_verified"},
         )
 
     def test_external_next_url_is_rejected(self) -> None:

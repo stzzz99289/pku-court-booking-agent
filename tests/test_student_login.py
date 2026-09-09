@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from src.booking.config import AppConfig, SelectorConfig
 from src.booking.login import _iaaa_login
@@ -65,7 +66,10 @@ class StudentLoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_iaaa_login_uses_dedicated_form_selectors(self) -> None:
         page = _FakePage()
 
-        await _iaaa_login(page, _student_config())
+        with patch("src.booking.login.mark_session_verified") as mark_verified:
+            await _iaaa_login(page, _student_config())
+
+        mark_verified.assert_called_once_with(".browser_profile")
 
         self.assertEqual(
             page.events,
