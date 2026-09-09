@@ -261,6 +261,10 @@ loopback.
 
 ## Configuration overview
 
+Court-booking accounts support two login methods: `alumni` for the phone,
+password, and captcha form; and `student` for PKU's IAAA user-ID/password
+form. The older value `iaaa` is accepted as an alias for `student`.
+
 ```
 config/
   cli/                      ← used by `python main.py`

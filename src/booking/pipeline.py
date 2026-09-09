@@ -9,7 +9,7 @@ def login_automation_ready(cfg: AppConfig) -> bool:
     if (s.logged_in_indicator or "").strip():
         return True
     method = (cfg.login_method or "alumni").strip().lower()
-    if method == "iaaa":
+    if method in {"student", "iaaa"}:
         return _iaaa_login_ready(cfg)
     if method == "alumni":
         return _alumni_login_ready(cfg)
@@ -27,10 +27,13 @@ def _alumni_login_ready(cfg: AppConfig) -> bool:
 
 
 def _iaaa_login_ready(cfg: AppConfig) -> bool:
-    # Minimal check: IAAA tab selector present, plus login button or direct login URL.
+    # Student login needs the venue login tab/link plus the PKU IAAA form fields.
     s = cfg.selectors
-    has_tab = bool((s.login_mode_iaaa or "").strip())
-    return has_tab and (
+    required = (
+        "login_mode_iaaa", "iaaa_login_link", "iaaa_username_input",
+        "iaaa_password_input", "iaaa_submit",
+    )
+    return all((getattr(s, key) or "").strip() for key in required) and (
         bool((s.login_button or "").strip()) or "/venue/login" in (cfg.base_url or "")
     )
 
@@ -41,7 +44,7 @@ def submit_flow_ready(cfg: AppConfig) -> bool:
 
 
 HINT_AFTER_NAVIGATE = (
-    "Opened site. Next: configure login — in user_config.yaml set `login_method` (`alumni` or `iaaa`); "
+    "Opened site. Next: configure login — in user_config.yaml set `login_method` (`alumni` or `student`); "
     "in site_config.yaml set `selectors.logged_in_indicator` if you rely on a saved session, "
     "or the selectors for your chosen method (see user_config.example.yaml)."
 )

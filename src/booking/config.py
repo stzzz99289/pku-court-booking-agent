@@ -39,6 +39,10 @@ class SelectorConfig:
     login_button: str = ""
     login_mode_iaaa: str = ""
     login_mode_alumni: str = ""
+    iaaa_login_link: str = ""
+    iaaa_username_input: str = ""
+    iaaa_password_input: str = ""
+    iaaa_submit: str = ""
     username_input: str = ""
     password_input: str = ""
     login_captcha_image: str = ""
@@ -461,6 +465,10 @@ def _parse_selectors(data: dict[str, Any]) -> SelectorConfig:
         login_button=str(s.get("login_button", "")),
         login_mode_iaaa=str(s.get("login_mode_iaaa", "")),
         login_mode_alumni=str(s.get("login_mode_alumni", "")),
+        iaaa_login_link=str(s.get("iaaa_login_link", "")),
+        iaaa_username_input=str(s.get("iaaa_username_input", "")),
+        iaaa_password_input=str(s.get("iaaa_password_input", "")),
+        iaaa_submit=str(s.get("iaaa_submit", "")),
         username_input=str(s.get("username_input", "")),
         password_input=str(s.get("password_input", "")),
         login_captcha_image=str(s.get("login_captcha_image", "")),

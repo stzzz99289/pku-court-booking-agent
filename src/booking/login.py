@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 _LOGIN_CAPTCHA_MAX_RETRIES = 3
 _LOGIN_SUBMIT_MAX_ATTEMPTS = 4
 _LOGIN_REDIRECT_TIMEOUT_MS = 6_000
+_IAAA_REDIRECT_TIMEOUT_MS = 15_000
 
 
 def _sel(cfg: AppConfig, name: str) -> str:
@@ -163,20 +164,53 @@ async def ensure_logged_in(
     method = (cfg.login_method or "alumni").strip().lower()
     await _open_login_form(page, cfg)
 
-    if method == "iaaa":
-        tab = _sel(cfg, "login_mode_iaaa")
-        if tab:
-            await page.locator(tab).first.click()
-        raise NotImplementedError(
-            "IAAA (校内师生) login is not implemented yet; set login_method: alumni "
-            "or configure logged_in_indicator after a manual IAAA login."
-        )
+    if method in {"student", "iaaa"}:
+        await _iaaa_login(page, cfg)
+        return
 
     if method == "alumni":
         await _alumni_login(page, cfg, solver)
         return
 
-    raise ValueError(f"Unknown login_method: {cfg.login_method!r}; use 'alumni' or 'iaaa'.")
+    raise ValueError(f"Unknown login_method: {cfg.login_method!r}; use 'alumni' or 'student'.")
+
+
+async def _iaaa_login(page: Page, cfg: AppConfig) -> None:
+    """PKU student/staff login through the IAAA username/password form."""
+    selectors = {
+        "student login tab": _sel(cfg, "login_mode_iaaa"),
+        "IAAA login link": _sel(cfg, "iaaa_login_link"),
+        "IAAA username": _sel(cfg, "iaaa_username_input"),
+        "IAAA password": _sel(cfg, "iaaa_password_input"),
+        "IAAA submit": _sel(cfg, "iaaa_submit"),
+    }
+    missing = [label for label, selector in selectors.items() if not selector]
+    if missing:
+        raise ValueError(f"Missing selector(s) for student login: {', '.join(missing)}.")
+
+    await page.locator(selectors["student login tab"]).first.click()
+    await page.locator(selectors["IAAA login link"]).first.click()
+    try:
+        await page.wait_for_url(
+            lambda url: "/ggtypt/login" in url or "/iaaa/" in url,
+            timeout=_IAAA_REDIRECT_TIMEOUT_MS,
+        )
+    except Exception as exc:
+        raise RuntimeError("Student login did not reach the PKU IAAA form.") from exc
+
+    await page.locator(selectors["IAAA username"]).first.fill(cfg.account)
+    await page.locator(selectors["IAAA password"]).first.fill(cfg.password)
+    await page.locator(selectors["IAAA submit"]).first.click()
+    try:
+        await page.wait_for_url(
+            lambda url: "/venue/" in url and "/venue/login" not in url,
+            timeout=_IAAA_REDIRECT_TIMEOUT_MS,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Student login was not accepted; check the user ID/password or the IAAA page."
+        ) from exc
+    await page.wait_for_load_state("domcontentloaded")
 
 
 async def _alumni_login(page: Page, cfg: AppConfig, solver: CaptchaSolver) -> None:

@@ -139,7 +139,8 @@ Configured via `captcha.provider` in user config. Implementations in `captcha.py
 ## Login Methods
 
 - `alumni` — Phone number + password (implemented)
-- `iaaa` — PKU IAAA SSO (selectors not yet configured)
+- `student` — PKU student/staff login through IAAA (user ID + password)
+- `iaaa` — backward-compatible alias for `student`
 
 ## Coding Regulations
 

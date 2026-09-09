@@ -7,7 +7,7 @@
 # Each entry's `name` is the unique identifier referenced by `workers:` lists
 # in the user_config.{test,scheduled}.yaml files.
 #
-# login_method: alumni | iaaa   (IAAA not implemented in code yet)
+# login_method: alumni | student   (`iaaa` remains a supported alias)
 
 users:
   - name: "alice"
@@ -18,6 +18,10 @@ users:
   #   login_method: "alumni"
   #   account: "13900000000"
   #   password: "another_password"
+  # - name: "student"
+  #   login_method: "student"
+  #   account: "your_student_id"
+  #   password: "your_iaaa_password"
 
 # ChaoJiYing (超级鹰) captcha solver — shared across both flows.
 captcha:

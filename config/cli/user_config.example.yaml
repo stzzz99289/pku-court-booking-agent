@@ -1,7 +1,7 @@
 # Copy to user_config.yaml and fill in. user_config.yaml is gitignored.
 
 # Login identities. Each entry is one account that can be referenced by workers.
-# login_method: alumni | iaaa   (IAAA not implemented in code yet)
+# login_method: alumni | student   (`iaaa` remains a supported alias)
 # name: a short unique identifier used in the workers list below.
 users:
   - name: "alice"
