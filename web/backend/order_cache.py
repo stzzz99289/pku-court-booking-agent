@@ -171,8 +171,17 @@ class OrderCacheService:
                     orders: list[Order] = await fetch_user_orders(
                         cfg, user, limit, after_fetch=_capture,
                     )
-                    user_orders = [order.to_dict() for order in orders]
-                    successful_users += 1
+                    if not orders and previous_by_user.get(user.name):
+                        message = (
+                            f"{user.name}: live query returned no orders; "
+                            "keeping cached results"
+                        )
+                        errors.append(message)
+                        job.append_log(f"[orders] {message}")
+                        user_orders = previous_by_user[user.name]
+                    else:
+                        user_orders = [order.to_dict() for order in orders]
+                        successful_users += 1
                 except Exception as exc:
                     message = f"{user.name}: {type(exc).__name__}: {exc}"
                     errors.append(message)

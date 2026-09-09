@@ -44,12 +44,15 @@ from playwright.async_api import Page
 from .browser import dispose_context, launch_persistent_context
 from .captcha import ManualCaptchaSolver
 from .config import AppConfig, UserConfig
-from .login import ensure_logged_in
+from .login import ensure_logged_in, session_token_expired
 from .session_verification import mark_session_verified
 
 log = logging.getLogger(__name__)
 
 PAID_STATUS = "已支付"
+_ORDER_ROWS_TIMEOUT_S = 10.0
+_ORDER_ROWS_POLL_S = 0.25
+_ORDER_PAGE_ATTEMPTS = 2
 
 
 @dataclass
@@ -103,12 +106,10 @@ def _parse_row(user: str, cells: list[str]) -> Order | None:
 
 
 async def _scrape_orders_table(page: Page, user: str) -> list[Order]:
-    """Parse the visible orders table. Rows are sorted newest-first by the site."""
-    rows: list[list[str]] = await page.evaluate(
-        """() => {
-            const t = document.querySelector('table');
-            if (!t) return [];
-            return Array.from(t.querySelectorAll('tbody tr')).map(tr =>
+    """Atomically parse all order rows. Rows are sorted newest-first by the site."""
+    rows: list[list[str]] = await page.locator("table tbody tr").evaluate_all(
+        """rows => {
+            return rows.map(tr =>
                 Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim())
             );
         }"""
@@ -119,6 +120,43 @@ async def _scrape_orders_table(page: Page, user: str) -> list[Order]:
         if order is not None:
             out.append(order)
     return out
+
+
+async def _wait_for_order_rows(
+    page: Page,
+    user: str,
+    timeout_s: float = _ORDER_ROWS_TIMEOUT_S,
+) -> list[Order]:
+    """Poll through Vue's transient empty-table render until real rows appear."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        rows = await _scrape_orders_table(page, user)
+        if rows:
+            return rows
+        if loop.time() >= deadline:
+            return []
+        await asyncio.sleep(_ORDER_ROWS_POLL_S)
+
+
+async def _dismiss_visible_confirm(page: Page) -> None:
+    """Dismiss an authentication warning modal if its confirm button is visible."""
+    try:
+        confirm = page.get_by_role("button", name="确定").first
+        if await confirm.count() and await confirm.is_visible():
+            await confirm.click()
+    except Exception:
+        pass
+
+
+async def _orders_session_rejected(page: Page) -> bool:
+    """Return True when the protected orders page rejects the saved session."""
+    modal = page.get_by_text("请登录后访问", exact=True)
+    try:
+        await modal.wait_for(state="visible", timeout=1_500)
+        return True
+    except Exception:
+        return await session_token_expired(page)
 
 
 async def fetch_user_orders(
@@ -136,27 +174,46 @@ async def fetch_user_orders(
         await _goto_with_retry(page, cfg.base_url)
         await ensure_logged_in(page, cfg, solver)
         url = _orders_url(cfg)
-        log.info("Navigating to orders page: %s", url)
-        await _goto_with_retry(page, url)
-        # If the saved-session heuristic was wrong, the orders page raises a
-        # "please login" modal; dismiss it, do a real login, and retry.
-        modal = page.get_by_text("请登录后访问", exact=True)
-        try:
-            await modal.wait_for(state="visible", timeout=1_500)
-            log.info("[%s] 'Please login' modal detected — re-authenticating.", user.name)
-            await page.get_by_role("button", name="确定").first.click()
-            await ensure_logged_in(page, cfg, solver)
+        initial_rows: list[Order] = []
+        for attempt in range(1, _ORDER_PAGE_ATTEMPTS + 1):
+            log.info(
+                "Navigating to orders page: %s (attempt %d/%d)",
+                url, attempt, _ORDER_PAGE_ATTEMPTS,
+            )
             await _goto_with_retry(page, url)
-        except Exception:
-            pass
-        # Wait for the table body to render at least one row (or stay empty).
-        try:
-            await page.locator("table tbody tr").first.wait_for(state="visible", timeout=10_000)
-        except Exception:
-            log.warning("Orders table did not render within 10 s for user %s.", user.name)
+            if await _orders_session_rejected(page):
+                log.info(
+                    "[%s] orders page rejected the saved session — forcing re-login.",
+                    user.name,
+                )
+                await _dismiss_visible_confirm(page)
+                await ensure_logged_in(page, cfg, solver, force=True)
+                await _goto_with_retry(page, url)
+                if await _orders_session_rejected(page):
+                    raise RuntimeError(
+                        f"Orders page still rejected the session for user {user.name} "
+                        "after a fresh login."
+                    )
+            initial_rows = await _wait_for_order_rows(page, user.name)
+            if initial_rows:
+                break
+            if attempt < _ORDER_PAGE_ATTEMPTS:
+                log.warning(
+                    "[%s] orders page stayed empty for %.0f s; navigating again before "
+                    "accepting an empty result.",
+                    user.name, _ORDER_ROWS_TIMEOUT_S,
+                )
+
+        if not initial_rows:
+            log.warning(
+                "Orders table remained empty after %d attempts for user %s.",
+                _ORDER_PAGE_ATTEMPTS, user.name,
+            )
             return []
         mark_session_verified(cfg.user_data_dir)
-        orders = await _collect_paid_orders(page, user.name, limit)
+        orders = await _collect_paid_orders(
+            page, user.name, limit, initial_rows=initial_rows,
+        )
         if after_fetch is not None:
             await after_fetch(page, orders)
         return orders
@@ -164,7 +221,13 @@ async def fetch_user_orders(
         await dispose_context(context)
 
 
-async def _collect_paid_orders(page: Page, user: str, limit: int) -> list[Order]:
+async def _collect_paid_orders(
+    page: Page,
+    user: str,
+    limit: int,
+    *,
+    initial_rows: list[Order] | None = None,
+) -> list[Order]:
     """Scrape page after page until we have `limit` paid orders or run out.
 
     Dedup by `order_no` because the iView "next page" click occasionally lands
@@ -178,7 +241,10 @@ async def _collect_paid_orders(page: Page, user: str, limit: int) -> list[Order]
     seen_any: set[str] = set()
     page_num = 1
     while True:
-        rows = await _scrape_orders_table(page, user)
+        if page_num == 1 and initial_rows is not None:
+            rows = initial_rows
+        else:
+            rows = await _wait_for_order_rows(page, user, timeout_s=5.0)
         statuses = sorted({o.pay_status for o in rows})
         new_any = sum(1 for o in rows if o.order_no and o.order_no not in seen_any)
         log.info("[%s] page %d: %d row(s) (%d new); pay_statuses=%s",

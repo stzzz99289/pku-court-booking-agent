@@ -81,6 +81,34 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(result["errors"]), 1)
             self.assertGreater(result["updated_at"], 100.0)
 
+    async def test_suspicious_empty_result_keeps_previous_cached_orders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = OrderCacheService(Path(directory) / "orders_cache.json")
+            service._write_cache({
+                "updated_at": 100.0,
+                "attempted_at": 100.0,
+                "orders": [
+                    {"user": "stz", "order_no": "KNOWN", "use_date": "2026-09-11"},
+                ],
+                "errors": [],
+            })
+            user = SimpleNamespace(name="stz")
+            base = SimpleNamespace(users=[user])
+
+            with (
+                patch("web.backend.order_cache.load_set", return_value=base),
+                patch("web.backend.order_cache.per_user_config", return_value=None),
+                patch("web.backend.order_cache.fetch_user_orders", return_value=[]),
+                patch("web.backend.order_cache.get_booking_lock", return_value=asyncio.Lock()),
+            ):
+                result = await service._fetch_and_store(Job("test", "orders:all"), 10)
+
+            self.assertEqual(
+                [order["order_no"] for order in result["orders"]], ["KNOWN"],
+            )
+            self.assertEqual(result["updated_at"], 100.0)
+            self.assertIn("keeping cached results", result["errors"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

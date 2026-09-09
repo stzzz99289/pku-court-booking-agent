@@ -118,7 +118,10 @@ lock because they reuse the same persistent browser profiles. During a refresh,
 current and future normal paid orders receive mobile-card proof screenshots in
 `data/order_proofs/`. The `(user, order_no)` index prevents recapture on manual
 refreshes; proofs whose use date is before today are removed at the start of
-the next refresh. Images are exposed only through the authenticated webapp.
+the next refresh. A transient empty table is polled and re-opened before being
+accepted; if an established user still returns zero rows, the webapp preserves
+that user's previous cache instead of erasing it. Images are exposed only
+through the authenticated webapp.
 
 **Session verification.** The Users tab shows the last time the live site
 accepted each account's session. Successful fresh logins and confirmed access
