@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 # Transient navigation errors that warrant one retry (mirror of runner.py's set).
 _GOTO_TRANSIENT_PATTERNS = (
+    "Timeout 30000ms exceeded",
     "net::ERR_ABORTED",
     "net::ERR_NETWORK_CHANGED",
     "net::ERR_CONNECTION_RESET",

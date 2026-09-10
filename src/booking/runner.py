@@ -39,6 +39,7 @@ def _reservation_url(cfg: AppConfig) -> str:
 # Transient navigation errors that warrant one retry (observed 2026-05-24:
 # net::ERR_ABORTED on the initial venue/home goto).
 _GOTO_TRANSIENT_PATTERNS = (
+    "Timeout 30000ms exceeded",
     "net::ERR_ABORTED",
     "net::ERR_NETWORK_CHANGED",
     "net::ERR_CONNECTION_RESET",
@@ -586,7 +587,8 @@ async def run(
 
     login_solver, click_solver = _make_solvers(cfg)
     cfg.profiler.begin("run_start")
-    context, _ = await launch_persistent_context(cfg)
+    with cfg.profiler.span("browser_launch"):
+        context, _ = await launch_persistent_context(cfg)
     page = context.pages[0] if context.pages else await context.new_page()
     out: BookingResult | None = None
     try:

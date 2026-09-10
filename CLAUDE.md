@@ -104,6 +104,11 @@ shared per-user `.browser_profile/user_<name>/`. The "Run now" button on Tab 2
 is also greyed (and the API rejects with HTTP 409) while
 `scheduler.in_no_test_window()` is true — the window opens
 `scheduled_prep_seconds + 60s` before fire and closes when the run finishes.
+Chromium startup is limited to two concurrent launches inside the webapp so a
+burst of scheduled workers cannot starve a small server before navigation.
+The current 2-vCPU/3.6-GiB production host should run no more than eight
+scheduled workers; its scheduled config starts three minutes before noon so
+all browsers can be prepared under that bounded launch rate.
 
 **Last-run persistence.** The scheduler writes `data/scheduled_last_run.log`
 (plain text, truncated each run) and `data/scheduled_last_run.json` (sidecar

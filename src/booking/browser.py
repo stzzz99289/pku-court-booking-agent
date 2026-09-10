@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -9,22 +10,36 @@ from .config import AppConfig
 
 log = logging.getLogger(__name__)
 
+# Starting many Chromium process trees simultaneously can saturate a small
+# server before any page has a chance to load. This limiter affects the
+# in-process web scheduler; CLI multiprocessing still manages its own workers.
+BROWSER_LAUNCH_CONCURRENCY = 2
+_launch_limiter: asyncio.Semaphore | None = None
+
+
+def _get_launch_limiter() -> asyncio.Semaphore:
+    global _launch_limiter
+    if _launch_limiter is None:
+        _launch_limiter = asyncio.Semaphore(BROWSER_LAUNCH_CONCURRENCY)
+    return _launch_limiter
+
 
 async def launch_persistent_context(cfg: AppConfig) -> tuple[BrowserContext, Path]:
     """Start Chromium with a persistent profile (cookies survive across runs)."""
     user_data = Path(cfg.user_data_dir).expanduser().resolve()
     user_data.mkdir(parents=True, exist_ok=True)
-    playwright = await async_playwright().start()
-    try:
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=str(user_data),
-            headless=cfg.headless,
-            slow_mo=cfg.browser.slow_mo_ms,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-    except Exception:
-        await playwright.stop()
-        raise
+    async with _get_launch_limiter():
+        playwright = await async_playwright().start()
+        try:
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=str(user_data),
+                headless=cfg.headless,
+                slow_mo=cfg.browser.slow_mo_ms,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            await playwright.stop()
+            raise
     setattr(context, "_playwright", playwright)  # type: ignore[attr-defined]
     return context, user_data
 
