@@ -44,6 +44,24 @@ META_FILE = DATA_DIR / "scheduled_last_run.json"
 # eyeballing `data/profiles/scheduled_YYYYMMDD.json`.
 PROFILES_DIR = DATA_DIR / "profiles"
 
+# Persistent profiles accumulate hundreds of megabytes of disposable Chromium
+# caches. Worker seeding needs authentication/session state, not those caches;
+# skipping them keeps the one-time copy small and out of the critical path.
+_PROFILE_SEED_IGNORE = shutil.ignore_patterns(
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "ShaderCache",
+    "CacheStorage",
+    "Crashpad",
+    "BrowserMetrics*",
+)
+
 LOG_RING_CAPACITY = 10_000
 RETRY_AFTER_CONFIG_ERROR_S = 60
 NO_TEST_BUFFER_S = 60  # added on top of prep_seconds: no test runs in this lead-up
@@ -384,7 +402,11 @@ class Scheduler:
                 f"{shared_profile.name}_worker_{idx}"
             )
             if not worker_profile.exists() and shared_profile.is_dir():
-                shutil.copytree(shared_profile, worker_profile)
+                shutil.copytree(
+                    shared_profile,
+                    worker_profile,
+                    ignore=_PROFILE_SEED_IGNORE,
+                )
                 log.info(
                     "scheduler: seeded isolated profile for worker %d (%s).",
                     idx, w.user,

@@ -107,8 +107,9 @@ is also greyed (and the API rejects with HTTP 409) while
 Chromium startup is limited to two concurrent launches inside the webapp so a
 burst of scheduled workers cannot starve a small server before navigation.
 Scheduled workers use durable worker-specific browser profiles, seeded once
-from the corresponding per-user profile, so duplicate workers for one account
-never open the same Chromium profile concurrently.
+from the corresponding per-user profile without disposable Chromium caches,
+so duplicate workers for one account never open the same Chromium profile
+concurrently and seeding stays out of the critical path.
 The current 2-vCPU/3.6-GiB production host should run no more than eight
 scheduled workers; its scheduled config starts three minutes before noon so
 all browsers can be prepared under that bounded launch rate.
