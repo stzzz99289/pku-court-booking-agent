@@ -73,6 +73,7 @@ class UserConfig:
     login_method: str
     account: str
     password: str
+    booking_phone: str = ""
 
 
 @dataclass
@@ -135,6 +136,7 @@ class AppConfig:
     account: str = ""
     password: str = ""
     login_method: str = "alumni"
+    booking_phone: str = ""
     # Populated from workers list; set by runner before the booking flow starts.
     date: str = ""
     # Ordered list of 2-digit start hours to try for this worker. The runner
@@ -338,11 +340,17 @@ def _parse_users(data: dict[str, Any]) -> list[UserConfig]:
         if name in seen:
             raise ValueError(f"users[{i}].name {name!r} is duplicated; user names must be unique.")
         seen.add(name)
+        booking_phone = str(u.get("booking_phone", "")).strip()
+        if booking_phone and not re.fullmatch(r"1\d{10}", booking_phone):
+            raise ValueError(
+                f"users[{i}].booking_phone must be an 11-digit mainland China mobile number."
+            )
         users.append(UserConfig(
             name=name,
             login_method=str(u["login_method"]).strip(),
             account=str(u["account"]),
             password=str(u["password"]),
+            booking_phone=booking_phone,
         ))
     return users
 

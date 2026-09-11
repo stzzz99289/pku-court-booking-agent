@@ -150,7 +150,9 @@ chmod 600 config/webapp/accounts.yaml config/webapp/auth.yaml
 ```
 
 To add a booking account, add another item under `users:` with a unique
-`name`, `account`, `password`, and `login_method`. To remove one, first remove
+`name`, `account`, `password`, and `login_method`. For a student/staff account
+whose reservation form does not prefill a contact number, also add
+`booking_phone`. To remove one, first remove
 scheduled/test worker entries that reference its `name`, then remove that user.
 Restart the webapp after editing. These credentials must be readable by the
 booking process to log into the PKU site, so they are plaintext at rest: protect

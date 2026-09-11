@@ -12,6 +12,11 @@ users:
   #   login_method: "alumni"
   #   account: "13800000000"
   #   password: "another_password"
+  # - name: "student"
+  #   login_method: "student"
+  #   account: "your_student_id"
+  #   password: "your_iaaa_password"
+  #   booking_phone: "13800000000"  # if the booking form does not prefill one
 
 # Run Chromium headless. In headless mode you only see status via terminal
 # output; the browser is auto-closed and the program exits when the flow ends.

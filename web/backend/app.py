@@ -182,7 +182,15 @@ def _users_payload() -> list[dict[str, Any]]:
     base_profile = Path(cfg.user_data_dir).resolve()
     out: list[dict[str, Any]] = []
     for u in cfg.users:
-        verified_at = last_session_verified(base_profile / f"user_{u.name}")
+        shared_profile = base_profile / f"user_{u.name}"
+        profile_paths = [shared_profile, *shared_profile.parent.glob(
+            f"{shared_profile.name}_worker_*"
+        )]
+        verified_times = [
+            value for value in (last_session_verified(path) for path in profile_paths)
+            if value is not None
+        ]
+        verified_at = max(verified_times, default=None)
         out.append({
             "name": u.name,
             "login_method": u.login_method,

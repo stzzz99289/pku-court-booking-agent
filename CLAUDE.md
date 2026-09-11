@@ -106,6 +106,9 @@ is also greyed (and the API rejects with HTTP 409) while
 `scheduled_prep_seconds + 60s` before fire and closes when the run finishes.
 Chromium startup is limited to two concurrent launches inside the webapp so a
 burst of scheduled workers cannot starve a small server before navigation.
+Scheduled workers use durable worker-specific browser profiles, seeded once
+from the corresponding per-user profile, so duplicate workers for one account
+never open the same Chromium profile concurrently.
 The current 2-vCPU/3.6-GiB production host should run no more than eight
 scheduled workers; its scheduled config starts three minutes before noon so
 all browsers can be prepared under that bounded launch rate.
@@ -155,6 +158,11 @@ Configured via `captcha.provider` in user config. Implementations in `captcha.py
 - `alumni` — Phone number + password (implemented)
 - `student` — PKU student/staff login through IAAA (user ID + password)
 - `iaaa` — backward-compatible alias for `student`
+
+Some student/staff accounts do not have a contact number prefilled on the
+reservation form. Set `booking_phone` on that user in the private
+`accounts.yaml`; alumni users automatically fall back to their phone-number
+login when the field is blank.
 
 ## Coding Regulations
 

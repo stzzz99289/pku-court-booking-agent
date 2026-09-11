@@ -19,6 +19,7 @@ import contextvars
 import copy
 import json
 import logging
+import shutil
 import time
 from collections import deque
 from dataclasses import asdict
@@ -373,6 +374,22 @@ class Scheduler:
                 log.warning("scheduler: worker references unknown user %r; skipping.", w.user)
                 continue
             wcfg = per_user_config(cfg, user)
+            # Multiple scheduled workers may reference the same user. Chromium
+            # persistent profiles are not safe to open from concurrent browser
+            # processes, and each process can otherwise see a different JWT
+            # snapshot. Give every worker a durable profile, seeding it once
+            # from the existing per-user profile to preserve current sessions.
+            shared_profile = Path(wcfg.user_data_dir)
+            worker_profile = shared_profile.with_name(
+                f"{shared_profile.name}_worker_{idx}"
+            )
+            if not worker_profile.exists() and shared_profile.is_dir():
+                shutil.copytree(shared_profile, worker_profile)
+                log.info(
+                    "scheduler: seeded isolated profile for worker %d (%s).",
+                    idx, w.user,
+                )
+            wcfg.user_data_dir = str(worker_profile)
             wcfg.date = w.date
             wcfg.start_time_list = list(w.active_start_time_list())
             wcfg.court_priority = list(w.court_priority)

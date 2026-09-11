@@ -593,8 +593,53 @@ async def discover_hour_page_boundaries(page: Page) -> list[list[int]]:
     return pages
 
 
-async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
-    """Check the agreement checkbox (if unchecked) and click the submit button."""
+async def _prepare_booking_phone(page: Page, cfg: AppConfig) -> BookingResult | None:
+    """Fill the reservation contact phone when the current form requires it."""
+    label = page.get_by_text("手机号", exact=True)
+    phone_input = label.first.locator("..").locator("input").first
+    try:
+        if not await phone_input.is_visible():
+            return None
+        if (await phone_input.input_value()).strip():
+            return None
+    except Exception:
+        return None
+
+    phone = (cfg.booking_phone or "").strip()
+    if not phone and (cfg.login_method or "alumni").lower() == "alumni":
+        account = (cfg.account or "").strip()
+        if re.fullmatch(r"1\d{10}", account):
+            phone = account
+    if not re.fullmatch(r"1\d{10}", phone):
+        return BookingResult(
+            False,
+            "Booking form requires a valid phone number; set booking_phone for this user in the private accounts config.",
+            {"configuration": "booking_phone"},
+        )
+    await phone_input.fill(phone)
+    log.info("Filled the required booking contact phone from private account configuration.")
+    return None
+
+
+async def _read_visible_message(page: Page) -> str:
+    """Return the first visible iView warning/error toast, if one is present."""
+    notices = page.locator(".ivu-message-warning, .ivu-message-error")
+    try:
+        for i in range(await notices.count()):
+            notice = notices.nth(i)
+            if await notice.is_visible():
+                return (await notice.inner_text()).strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> BookingResult | None:
+    """Prepare the form and submit it, returning an immediate UI rejection."""
+    phone_error = await _prepare_booking_phone(page, cfg)
+    if phone_error is not None:
+        return phone_error
+
     agree = _sel(cfg, "agreement_checkbox")
     if agree:
         loc = page.locator(agree).first
@@ -613,12 +658,20 @@ async def agree_and_submit_booking(page: Page, cfg: AppConfig) -> None:
         with cfg.profiler.span("wait_post_submit_outcome"):
             for _ in range(40):
                 if await page.locator(".verifybox").first.is_visible():
-                    return
+                    return None
                 if await _read_system_error_modal(page):
-                    return
+                    return None
                 if any("tradeNo=" in p.url for p in ctx.pages):
-                    return
+                    return None
+                message = await _read_visible_message(page)
+                if message:
+                    return BookingResult(
+                        False,
+                        f"Booking form rejected before captcha: {message}",
+                        {"url": page.url, "pre_captcha": True},
+                    )
                 await asyncio.sleep(0.05)
+    return None
 
 
 _BOOKING_CAPTCHA_MAX_RETRIES = 6
@@ -1034,8 +1087,8 @@ async def confirm_payment(page: Page, cfg: AppConfig) -> tuple[Page, BookingResu
             reason = (
                 "Booking reserved but payment tab opened blank and never reached the "
                 "trade URL (popup orphaned)." if had_blank_popup else
-                "captcha passed but no payment tab opened and no error modal appeared "
-                "(slot likely taken concurrently)."
+                "submission produced no payment tab and no visible error; the site may "
+                "have rejected the form before captcha or the slot may have been taken."
             )
             return page, BookingResult(
                 False,

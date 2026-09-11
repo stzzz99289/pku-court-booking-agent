@@ -542,7 +542,9 @@ async def _attempt_book_from_priority_list(
             {"stopped_at": "after_court_selection", "final_url": page.url},
         ), chosen_hour
     with cfg.profiler.span("agree_and_submit_booking"):
-        await agree_and_submit_booking(page, cfg)
+        submit_error = await agree_and_submit_booking(page, cfg)
+    if submit_error is not None:
+        return page, submit_error, chosen_hour
 
     rejection = await check_booking_rejection(page)
     if rejection is not None:
@@ -725,6 +727,7 @@ def _apply_worker_config(cfg: AppConfig, worker: WorkerConfig, index: int, multi
     cfg.account = user.account
     cfg.password = user.password
     cfg.login_method = user.login_method
+    cfg.booking_phone = user.booking_phone
     cfg.date = worker.date
     cfg.start_time_list = list(worker.active_start_time_list())
     cfg.court_priority = list(worker.court_priority)

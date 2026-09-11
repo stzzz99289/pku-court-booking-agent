@@ -42,5 +42,6 @@ def per_user_config(base: AppConfig, user: UserConfig) -> AppConfig:
     cfg.account = user.account
     cfg.password = user.password
     cfg.login_method = user.login_method
+    cfg.booking_phone = user.booking_phone
     cfg.user_data_dir = str(Path(cfg.user_data_dir).resolve() / f"user_{user.name}")
     return cfg
