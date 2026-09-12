@@ -4,6 +4,7 @@ import asyncio
 import copy
 import logging
 import multiprocessing
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,6 +22,7 @@ from .booking_flow import (
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
 from .captcha import ManualCaptchaSolver
 from .config import AppConfig, UserConfig, WorkerConfig, load_config
+from .diagnostics import dump_crash_diagnostics
 from .login import ensure_logged_in, session_token_expired
 from .orders import Order, fetch_user_orders, format_orders_table
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
@@ -276,10 +278,28 @@ def _format_target_date_label(date_str: str) -> str | None:
 
 
 async def _read_date_button_texts(page) -> list[str]:
-    """Return the inner text of every .date_box button currently rendered."""
-    buttons = page.locator(".date_box > div")
-    count = await buttons.count()
-    return [(await buttons.nth(i).inner_text()).strip() for i in range(count)]
+    """Atomically read the current date row so a Vue re-render cannot strand nth(i)."""
+    try:
+        texts = await page.locator(".date_box > div").all_inner_texts()
+    except Exception as exc:
+        log.warning("Date row changed while reading it (%s); treating as transient.", exc)
+        return []
+    return [text.strip() for text in texts]
+
+
+async def _wait_for_date_buttons_after_refresh(page) -> bool:
+    """Wait for the post-fire date row without issuing another competing reload."""
+    try:
+        await page.locator(".date_box > div").first.wait_for(
+            state="visible", timeout=_DATE_REFRESH_RESPONSE_TIMEOUT_MS,
+        )
+        return True
+    except Exception:
+        log.warning(
+            "Date buttons did not render within %.1f s after the refresh.",
+            _DATE_REFRESH_RESPONSE_TIMEOUT_MS / 1000,
+        )
+        return False
 
 
 async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
@@ -314,13 +334,13 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
         except Exception as e:
             log.warning("Reload + response-wait failed on attempt %d/%d (%s); continuing.",
                         attempt, _MAX_DATE_REFRESH_ATTEMPTS, e)
-        await _ensure_date_buttons_visible(page)
+        buttons_visible = await _wait_for_date_buttons_after_refresh(page)
 
         if target is None:
             log.info("Schedule data loaded after refresh.")
             return
 
-        visible = await _read_date_button_texts(page)
+        visible = await _read_date_button_texts(page) if buttons_visible else []
         if any(target in t for t in visible):
             log.info("Schedule data loaded after refresh — target date %s visible (attempt %d/%d).",
                      target, attempt, _MAX_DATE_REFRESH_ATTEMPTS)
@@ -589,24 +609,32 @@ async def run(
 
     login_solver, click_solver = _make_solvers(cfg)
     cfg.profiler.begin("run_start")
-    with cfg.profiler.span("browser_launch"):
-        context, _ = await launch_persistent_context(cfg)
-    page = context.pages[0] if context.pages else await context.new_page()
+    context = None
+    page = None
     out: BookingResult | None = None
+    stage = "browser_launch"
     try:
+        with cfg.profiler.span("browser_launch"):
+            context, _ = await launch_persistent_context(cfg)
+        stage = "open_page"
+        page = context.pages[0] if context.pages else await context.new_page()
+        stage = "initial_navigation"
         await _goto_with_retry(page, cfg.base_url)
 
         # Stage 1: login (stop with hint if selectors not configured).
         if not login_automation_ready(cfg):
             out = BookingResult(True, HINT_AFTER_NAVIGATE, {"stopped_at": "after_navigate", "final_url": page.url})
         else:
+            stage = "login"
             with cfg.profiler.span("ensure_logged_in"):
                 await ensure_logged_in(page, cfg, login_solver)
+            stage = "reservation_navigation"
             with cfg.profiler.span("navigate_to_reservation"):
                 await _navigate_to_reservation(page, cfg, login_solver)
 
             # Scheduled mode: wait at the reservation page, then refresh.
             if cfg.scheduled_mode:
+                stage = "scheduled_wait_and_refresh"
                 await _wait_for_scheduled_time(page, cfg)
 
             # Refresh-and-rewalk loop: each iteration walks start_time_list
@@ -620,6 +648,7 @@ async def run(
                 last_failure: BookingResult | None = None
                 transient_attempts = 0
                 for refresh_attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
+                    stage = f"booking_attempt_{refresh_attempt}"
                     if refresh_attempt > 1:
                         log.info("Refresh #%d: re-checking start_time_list from the top.",
                                  refresh_attempt - 1)
@@ -649,6 +678,7 @@ async def run(
                         # plain re-navigate hits the same wall. Force a fresh
                         # login (clears stale storage + re-authenticates) first.
                         if result.details.get("session_expired"):
+                            stage = "retry_login"
                             log.warning("Session token expired — forcing re-login before retry.")
                             with cfg.profiler.span("relogin"):
                                 await ensure_logged_in(page, cfg, login_solver, force=True)
@@ -657,6 +687,7 @@ async def run(
                             result.message, transient_attempts, _MAX_TRANSIENT_RETRIES,
                         )
                         with cfg.profiler.span("renavigate_to_reservation"):
+                            stage = "retry_reservation_navigation"
                             await _navigate_to_reservation(page, cfg, login_solver)
                         continue
 
@@ -693,14 +724,31 @@ async def run(
 
         assert out is not None
         return out
+    except Exception as exc:
+        profile_name = Path(cfg.user_data_dir).name
+        await dump_crash_diagnostics(
+            page,
+            label=f"worker_{cfg.worker_index}_{profile_name}_{stage}",
+            metadata={
+                "stage": stage,
+                "worker_index": cfg.worker_index,
+                "profile_name": profile_name,
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+        )
+        raise
     finally:
         if out is not None:
             _print_result(out)
         report = cfg.profiler.report()
         if report:
             print(report)
-        await wait_until_user_closes_window(cfg, page)
-        await dispose_context(context)
+        if page is not None:
+            await wait_until_user_closes_window(cfg, page)
+        if context is not None:
+            await dispose_context(context)
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ This directory is for local, disposable investigation artifacts. Its contents
 are ignored by Git except for this guide.
 
 - `post-submit/` — timestamped HTML, JSON, and screenshots from booking failures
+- `crashes/YYYYMMDD/` — automatic pre-disposal evidence for unexpected worker exceptions
 - `smoke/` — screenshots and captures from local smoke tests
 - `probes/` — focused diagnostic logs and payloads
 - `studies/` — downloaded site assets and UI/reverse-engineering experiments

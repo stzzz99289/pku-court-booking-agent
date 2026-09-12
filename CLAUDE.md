@@ -119,6 +119,12 @@ all browsers can be prepared under that bounded launch rate.
 with timing + result summary), so the Scheduled Task tab still shows the
 previous run's log after a webapp restart.
 
+**Crash diagnostics.** An unexpected runner exception captures a best-effort
+full-page screenshot, HTML snapshot, visible-dialog summary, stage, and
+traceback under `debugging/crashes/YYYYMMDD/` before its browser context is
+closed. Capture operations have short timeouts and run only after a worker has
+already crashed; the directory is private and ignored by Git.
+
 **Order cache.** The webapp refreshes all users' paid orders every day at
 08:00 and persists the combined result in `data/orders_cache.json`. The Users
 & Orders tab loads this cache immediately, shows its last update time, and can

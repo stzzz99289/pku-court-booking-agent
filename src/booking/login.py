@@ -80,12 +80,12 @@ async def _dismiss_please_login_modal(page: Page) -> bool:
         return False
 
 
-async def _open_login_form(page: Page, cfg: AppConfig) -> None:
-    """Click the login button to reach the login form, or verify we're already there."""
+async def _open_login_form(page: Page, cfg: AppConfig) -> bool:
+    """Open the login form, returning False if a valid-looking session rendered instead."""
     if "/venue/login" in page.url:
-        return
+        return True
     if await _alumni_login_form_visible(page):
-        return
+        return True
 
     # Some sessions land on the home page with a '请登录后访问' modal covering
     # the login button — dismiss it before probing for the control.
@@ -107,7 +107,7 @@ async def _open_login_form(page: Page, cfg: AppConfig) -> None:
         # actually already logged in.
         if await _session_looks_logged_in(page):
             log.info("Login button never appeared but session indicators visible; treating as logged in.")
-            return
+            return False
         # One more chance: dismiss a late-arriving 请登录 modal and retry.
         if await _dismiss_please_login_modal(page):
             try:
@@ -129,6 +129,7 @@ async def _open_login_form(page: Page, cfg: AppConfig) -> None:
         raise RuntimeError(f"Login control not found: {login_btn!r}")
     await login_loc.first.click()
     await page.wait_for_load_state("domcontentloaded")
+    return True
 
 
 async def ensure_logged_in(
@@ -163,7 +164,12 @@ async def ensure_logged_in(
             return
 
     method = (cfg.login_method or "alumni").strip().lower()
-    await _open_login_form(page, cfg)
+    login_form_open = await _open_login_form(page, cfg)
+    if not login_form_open:
+        # The SPA can paint its authenticated header while `_open_login_form`
+        # is waiting for a login button. Do not continue into a login-method
+        # tab that cannot exist on the authenticated page.
+        return
 
     if method in {"student", "iaaa"}:
         await _iaaa_login(page, cfg)
