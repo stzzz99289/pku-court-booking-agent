@@ -234,9 +234,21 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
                         await btn.click(timeout=3_000)
                     resp = await resp_info.value
                 except Exception as e:
-                    # Either the click hung (capped at 3 s) or the response never came;
-                    # both mean "no fresh cache this round" — fall through to the DOM
-                    # walk in select_court_time instead of crashing the worker.
+                    # Under release-time load the day/info endpoint can return a body
+                    # the SPA cannot parse. It then opens a blocking "返回数据格式不正确"
+                    # modal. Treat that as a transient navigation failure; continuing
+                    # against the old table would scan the wrong date and the modal
+                    # would intercept later schedule-arrow clicks.
+                    modal_error = await _consume_transient_schedule_error(page)
+                    if modal_error:
+                        cfg.cached_free_slots = {}
+                        return BookingResult(
+                            False,
+                            f"Site returned a transient schedule-data error: {modal_error}",
+                            {"transient": True, "site_error": modal_error},
+                        )
+                    # Otherwise either the click hung (capped at 3 s) or the response
+                    # never came. Fall through to the DOM walk without a JSON cache.
                     log.warning("Date click / day/info response failed (%s); proceeding without cache.", e)
                     cfg.cached_free_slots = {}
                     return None
@@ -290,6 +302,17 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     target_time = f"{start:02d}:00-{end:02d}:00"
     log.info("Looking for time slot: %s", target_time)
 
+    # The site's malformed-response modal can arrive just after the date-click
+    # timeout. Consume it here as a second line of defence before performing any
+    # table interaction that its full-page overlay would block.
+    modal_error = await _consume_transient_schedule_error(page)
+    if modal_error:
+        return BookingResult(
+            False,
+            f"Site returned a transient schedule-data error: {modal_error}",
+            {"transient": True, "site_error": modal_error, "target_time": target_time},
+        )
+
     # Wait for the schedule table (inside .spaceTable) to populate after date selection.
     # Both header + body must render before we can trust a "no free court"
     # verdict — otherwise we'd silently scan an empty DOM and report the
@@ -318,6 +341,17 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
             False,
             f"Schedule table body for {target_time} did not repopulate after date switch (transient).",
             {"transient": True, "target_time": target_time},
+        )
+
+    # Also check after the network-backed table waits. The modal can be raised
+    # while those waits are in progress and would otherwise block an arrow or
+    # court-cell click immediately afterward.
+    modal_error = await _consume_transient_schedule_error(page)
+    if modal_error:
+        return BookingResult(
+            False,
+            f"Site returned a transient schedule-data error: {modal_error}",
+            {"transient": True, "site_error": modal_error, "target_time": target_time},
         )
 
     header_cells = sched_table.locator("thead td")
@@ -727,10 +761,47 @@ _SYSTEM_ERROR_MODAL_JS = """
 }
 """
 
+_TRANSIENT_SCHEDULE_ERROR_TEXT = "返回数据格式不正确"
+
+_DISMISS_SYSTEM_ERROR_MODAL_JS = """
+() => {
+    const wraps = Array.from(document.querySelectorAll('.ivu-modal-wrap'));
+    for (const w of wraps) {
+        if (w.classList.contains('ivu-modal-hidden')) continue;
+        const body = w.querySelector('.ivu-modal-body');
+        if (!body || !body.innerText.includes('系统提示')) continue;
+        const button = w.querySelector('.ivu-modal-confirm-footer button');
+        if (button) {
+            button.click();
+            return true;
+        }
+    }
+    return false;
+}
+"""
+
 
 async def _read_system_error_modal(page: Page) -> str:
     """Return the body text of a visible '系统提示' rejection modal, or '' if none."""
     return await page.evaluate(_SYSTEM_ERROR_MODAL_JS)
+
+
+async def _consume_transient_schedule_error(page: Page) -> str:
+    """Dismiss and return the site's transient malformed day/info response error."""
+    try:
+        error_text = await _read_system_error_modal(page)
+    except Exception:
+        return ""
+    if _TRANSIENT_SCHEDULE_ERROR_TEXT not in error_text:
+        return ""
+    try:
+        await page.evaluate(_DISMISS_SYSTEM_ERROR_MODAL_JS)
+    except Exception as exc:
+        # The runner will re-navigate for this transient result, so failure to
+        # animate/unmount the modal is not fatal. Keep the original site error.
+        log.warning("Could not dismiss transient schedule-data modal: %s", exc)
+    log.warning("Transient schedule-data modal detected and dismissed: %s", error_text)
+    return error_text
 
 
 async def check_booking_rejection(page: Page) -> BookingResult | None:
