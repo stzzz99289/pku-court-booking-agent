@@ -138,9 +138,14 @@ class ScheduleTransportTests(unittest.TestCase):
                 heartbeat = {"schema": 1, "source": "laptop", "state": "running", "sent_at": 1000}
                 schedule_sync.receive("heartbeat", json.dumps(heartbeat).encode())
                 self.assertEqual(schedule_sync.checkin_status()["state"], "pending")
-                response = {"schema": 1, "source": "laptop", "checkin_request_id": token, "sent_at": 1000, "host": "test-laptop"}
+                response = {
+                    "schema": 1, "source": "laptop", "checkin_request_id": token,
+                    "sent_at": 1000, "host": "test-laptop",
+                    "booking_task": {"state": "enabled", "detail": "Daily booking task is enabled for 11:57:00.", "daily_time": "11:57:00"},
+                }
                 schedule_sync.receive("checkin", json.dumps(response).encode())
                 self.assertEqual(schedule_sync.checkin_status()["state"], "responded")
+                self.assertEqual(schedule_sync.checkin_status()["booking_task"]["state"], "enabled")
                 self.assertEqual(json.loads((root / "heartbeat.json").read_text())["state"], "running")
                 with patch.object(schedule_sync, "REPORT_FILE", root / "report.json"):
                     status = schedule_sync.display_status()
@@ -149,6 +154,10 @@ class ScheduleTransportTests(unittest.TestCase):
 
                 schedule_sync.request_checkin()
                 self.assertNotEqual(token, schedule_sync.pending_checkin_id())
+                response["booking_task"] = {"state": "enabled", "detail": "ok", "daily_time": "bad"}
+                with self.assertRaises(ValueError):
+                    schedule_sync.receive("checkin", json.dumps(response).encode())
+                response["booking_task"]["daily_time"] = "11:57:00"
                 with self.assertRaises(ValueError):
                     schedule_sync.receive("checkin", json.dumps(response).encode())
                 self.assertEqual(schedule_sync.checkin_status()["state"], "pending")
@@ -164,6 +173,7 @@ class ScheduleTransportTests(unittest.TestCase):
         with (
             patch("web.backend.schedule_sync.subprocess.run") as run,
             patch.object(schedule_sync, "_ssh_send") as send,
+            patch.object(schedule_sync, "daily_booking_task_status", return_value={"state": "enabled", "detail": "ok", "daily_time": "11:57:00"}),
         ):
             run.return_value = SimpleNamespace(returncode=0, stdout="\n")
             self.assertFalse(schedule_sync.probe_checkin())
@@ -172,6 +182,7 @@ class ScheduleTransportTests(unittest.TestCase):
             self.assertTrue(schedule_sync.probe_checkin())
             self.assertEqual(send.call_args.args[0], "checkin")
             self.assertEqual(send.call_args.args[1]["checkin_request_id"], token)
+            self.assertEqual(send.call_args.args[1]["booking_task"]["state"], "enabled")
 
 
 if __name__ == "__main__":

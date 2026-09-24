@@ -220,6 +220,18 @@ table.data tbody tr:hover td { background: rgba(244, 247, 252, 0.65); }
 .laptop-activity-state { font-size: 0.78rem; font-weight: 750; text-align: right; }
 .laptop-activity-time { display: block; margin-top: 0.3rem; font-size: clamp(1.15rem, 3vw, 1.55rem); font-variant-numeric: tabular-nums; line-height: 1.25; }
 .laptop-activity-detail { display: block; margin-top: 0.3rem; font-size: 0.78rem; }
+.checkin-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem; margin-top: 0.85rem; }
+.checkin-result { min-width: 0; padding: 0.75rem 0.85rem; border: 1px solid var(--border); border-radius: 11px; background: #fff; color: var(--text); }
+.checkin-result.ok { border-color: #bde8d2; background: #f8fefa; }
+.checkin-result.warn { border-color: #f0dea9; background: #fffdf6; }
+.checkin-result.err { border-color: #f2c7cc; background: #fffafb; }
+.checkin-result span, .checkin-result strong, .checkin-result small { display: block; }
+.checkin-result span { color: var(--muted); font-size: 0.72rem; font-weight: 750; text-transform: uppercase; }
+.checkin-result strong { margin-top: 0.15rem; font-size: 1rem; }
+.checkin-result.ok strong { color: var(--ok); }
+.checkin-result.warn strong { color: var(--warn); }
+.checkin-result.err strong { color: var(--err); }
+.checkin-result small { margin-top: 0.15rem; color: var(--muted); font-size: 0.73rem; overflow-wrap: anywhere; }
 .laptop-activity-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px solid currentColor; font-size: 0.78rem; }
 .laptop-activity-actions .btn { flex: 0 0 auto; min-height: 36px; padding: 0.4rem 0.75rem; }
 
@@ -549,6 +561,7 @@ table.data tbody tr:hover td { background: rgba(244, 247, 252, 0.65); }
   .content { width: calc(100% - 24px); padding: 1rem 0 1.5rem; }
   .panel { margin-bottom: 0.85rem; padding: 1.05rem; border-radius: 15px; }
   .panel h2 { font-size: 1.12rem; }
+  .checkin-results { grid-template-columns: 1fr; }
   .laptop-activity-actions { align-items: stretch; flex-direction: column; }
   .laptop-activity-actions .btn { width: 100%; }
   .section-heading { align-items: center; }

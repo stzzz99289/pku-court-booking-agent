@@ -129,7 +129,11 @@ It cannot directly query a sleeping or NATed laptop.
 The Schedule page's on-demand check-in button writes a three-minute request
 on the server. A separate lightweight Windows task polls for requests over
 outbound SSH once a minute and sends a separate check-in response only when asked.
-The six routine check-in times are unchanged; an unanswered request times out.
+The response has two independent results: the laptop answered, and a read-only
+Windows Task Scheduler check confirms that the daily booking task is enabled
+with the expected daily trigger, time, and command. This check does not launch
+a booking or guarantee that Windows will be awake at noon. The six routine
+check-in times are unchanged; an unanswered request times out.
 
 `scripts/install_windows_schedule.ps1` installs the daily run, routine
 heartbeat, and on-demand poll tasks for the signed-in

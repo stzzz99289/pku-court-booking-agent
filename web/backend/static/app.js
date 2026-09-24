@@ -471,10 +471,33 @@ function renderLaptopCheckin(checkin) {
   const state = checkin?.state || "none";
   button.dataset.pending = state === "pending" ? "yes" : "";
   button.disabled = checkinSubmitting || state === "pending";
-  if (state === "pending") feedback.textContent = "Waiting for the laptop’s response (up to 3 minutes)…";
-  else if (state === "responded") feedback.textContent = `Fresh response received ${new Date(checkin.responded_at * 1000).toLocaleString()}.`;
-  else if (state === "timed_out") feedback.textContent = "No response within 3 minutes. The laptop may be asleep or offline.";
-  else feedback.textContent = "Request a fresh response from this laptop.";
+  const setResult = (name, tone, label, detail) => {
+    document.getElementById(`checkin-${name}-result`).className = `checkin-result ${tone}`;
+    document.getElementById(`checkin-${name}-state`).textContent = label;
+    document.getElementById(`checkin-${name}-detail`).textContent = detail;
+  };
+  if (state === "pending") {
+    feedback.textContent = "Waiting for the laptop’s response (up to 3 minutes)…";
+    setResult("laptop", "warn", "Checking…", "Waiting for a fresh reply.");
+    setResult("task", "warn", "Checking…", "Task status arrives with the laptop's reply.");
+  } else if (state === "responded") {
+    const received = new Date(checkin.responded_at * 1000).toLocaleString();
+    feedback.textContent = `Fresh check completed ${received}.`;
+    setResult("laptop", "ok", "Alive", `Responded ${received}.`);
+    const task = checkin.booking_task || {};
+    const tone = task.state === "enabled" ? "ok" : task.state === "unavailable" ? "warn" : task.state ? "err" : "warn";
+    const label = {enabled: "Enabled", disabled: "Disabled", missing: "Missing",
+      misconfigured: "Misconfigured", unavailable: "Could not verify"}[task.state] || "Not checked";
+    setResult("task", tone, label, task.detail || "Press Check now again to inspect the daily task.");
+  } else if (state === "timed_out") {
+    feedback.textContent = "No response within 3 minutes. The laptop may be asleep or offline.";
+    setResult("laptop", "err", "No response", "The latest on-demand check timed out.");
+    setResult("task", "warn", "Not verified", "The laptop did not respond, so its task could not be checked.");
+  } else {
+    feedback.textContent = "Request a fresh response from this laptop.";
+    setResult("laptop", "muted", "Not checked", "Press Check now for a fresh response.");
+    setResult("task", "muted", "Not checked", "Task status comes from the laptop's response.");
+  }
 }
 
 async function pollSchedule() {

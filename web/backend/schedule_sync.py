@@ -26,6 +26,7 @@ from src.booking.site_constants import VENUES
 from web.backend.config_loader import ACCOUNTS_PATH, WEBAPP_CONFIG_DIR, load_set
 from web.backend.jobs import configure_secret_redaction, redact_sensitive_text, redact_sensitive_value
 from web.backend.scheduler import DATA_DIR, LOG_FILE, META_FILE, Scheduler, compute_next_fire
+from web.backend.task_health import daily_booking_task_status
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_FILE = DATA_DIR / "schedule_display.json"
@@ -163,6 +164,14 @@ def _validate_checkin(data: dict[str, Any]) -> None:
         raise ValueError("check-in has no timestamp")
     if not isinstance(data.get("host"), str) or len(data["host"]) > 255:
         raise ValueError("invalid check-in host")
+    task = data.get("booking_task")
+    if not isinstance(task, dict) or task.get("state") not in {"enabled", "disabled", "missing", "misconfigured", "unavailable"}:
+        raise ValueError("invalid booking task status")
+    if not isinstance(task.get("detail"), str) or len(task["detail"]) > 200:
+        raise ValueError("invalid booking task detail")
+    daily_time = task.get("daily_time")
+    if daily_time is not None and (not isinstance(daily_time, str) or not re.fullmatch(r"\d{2}:\d{2}:\d{2}", daily_time)):
+        raise ValueError("invalid booking task time")
 
 
 def checkin_status() -> dict[str, Any]:
@@ -178,6 +187,7 @@ def checkin_status() -> dict[str, Any]:
         "requested_at": request.get("requested_at"),
         "responded_at": request.get("responded_at"),
         "expires_at": request.get("expires_at"),
+        "booking_task": request.get("booking_task") if state == "responded" else None,
     }
 
 
@@ -253,6 +263,7 @@ def receive(kind: str, raw: bytes) -> None:
             raise ValueError("check-in request is unknown or expired")
         request["responded_at"] = time.time()
         request["host"] = data["host"]
+        request["booking_task"] = data["booking_task"]
         _atomic_json(CHECKIN_FILE, request)
     elif kind == "config":
         _receive_config(data)
@@ -329,12 +340,19 @@ def probe_checkin() -> bool:
         return False
     if not re.fullmatch(r"[0-9a-f]{32}", request_id):
         raise ValueError("server returned an invalid check-in request ID")
+    try:
+        task_status = daily_booking_task_status()
+    except Exception:
+        # Task Scheduler/config failures must not conceal the fact that the
+        # laptop itself answered this request.
+        task_status = {"state": "unavailable", "detail": "Could not inspect the daily booking task.", "daily_time": None}
     _ssh_send("checkin", {
         "schema": 1,
         "source": "laptop",
         "checkin_request_id": request_id,
         "sent_at": time.time(),
         "host": platform.node(),
+        "booking_task": task_status,
     })
     return True
 
