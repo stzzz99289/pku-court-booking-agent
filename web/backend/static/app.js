@@ -465,14 +465,25 @@ function renderScheduleStatus(data) {
 
   const fmt = (epoch) => epoch ? new Date(epoch * 1000).toLocaleString() : "—";
   document.getElementById("schedule-last-updated").textContent = fmt(data.last_updated_at);
-  document.getElementById("schedule-host-last-seen").textContent = data.mode === "external"
-    ? fmt(data.laptop_last_seen_at) : "This server";
+  const activity = document.getElementById("schedule-laptop-activity");
+  activity.hidden = data.mode !== "external";
+  if (data.mode === "external") {
+    const lastSeen = data.laptop_last_seen_at;
+    const state = lastSeen ? (data.laptop_alive ? "Recently active" : "Check-in overdue") : "No check-in yet";
+    activity.className = "laptop-activity " + (lastSeen ? (data.laptop_alive ? "ok" : "err") : "unknown");
+    document.getElementById("schedule-laptop-state").textContent = state;
+    document.getElementById("schedule-host-last-seen").textContent = lastSeen ? fmt(lastSeen) : "Never checked in";
+    const ageMinutes = lastSeen ? Math.max(0, Math.floor(((data.now || Date.now() / 1000) - lastSeen) / 60)) : null;
+    const age = ageMinutes == null ? "" : ageMinutes < 60 ? `${ageMinutes} min ago`
+      : `${Math.floor(ageMinutes / 60)} hr ${ageMinutes % 60} min ago`;
+    document.getElementById("schedule-host-age").textContent = lastSeen
+      ? `Last check-in ${age} · expected at least every 5 hours` : "Waiting for the laptop's first check-in.";
+  }
   document.getElementById("schedule-source").textContent = data.mode === "external"
     ? `Booking runs on ${data.laptop_host || "the laptop"}; this page shows its latest uploaded report.`
     : "Booking runs on this server.";
   const warning = document.getElementById("schedule-warning");
   const messages = [];
-  if (data.mode === "external" && !data.laptop_alive) messages.push("No laptop heartbeat in the last five hours.");
   if (data.today_report_missing) messages.push("No completed booking report has arrived today.");
   warning.innerHTML = messages.map((message) => `<p class="result-box err">${escapeHtml(message)}</p>`).join("");
 

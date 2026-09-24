@@ -203,6 +203,23 @@ table.data tbody tr:hover td { background: rgba(244, 247, 252, 0.65); }
 .badge.err { background: var(--err-soft); color: var(--err); }
 .badge.run { background: var(--accent-soft); color: var(--accent); }
 
+.laptop-activity {
+  margin: 0.8rem 0 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+.laptop-activity[hidden] { display: none; }
+.laptop-activity.ok { border-color: #bde8d2; background: var(--ok-soft); color: var(--ok); }
+.laptop-activity.err { border-color: #f2c7cc; background: var(--err-soft); color: var(--err); }
+.laptop-activity.unknown { color: var(--muted); }
+.laptop-activity-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.laptop-activity-label { font-size: 0.75rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+.laptop-activity-state { font-size: 0.78rem; font-weight: 750; text-align: right; }
+.laptop-activity-time { display: block; margin-top: 0.3rem; font-size: clamp(1.15rem, 3vw, 1.55rem); font-variant-numeric: tabular-nums; line-height: 1.25; }
+.laptop-activity-detail { display: block; margin-top: 0.3rem; font-size: 0.78rem; }
+
 .orders-toolbar { display: flex; align-items: end; gap: 0.8rem; margin: 1rem 0 0.7rem; }
 .orders-toolbar label { min-width: 260px; margin: 0; color: var(--muted); font-size: 0.75rem; font-weight: 650; }
 .orders-toolbar select { height: 42px; margin: 0.25rem 0 0; padding-block: 0.45rem; font-size: 0.82rem; }

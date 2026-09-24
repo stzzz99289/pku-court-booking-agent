@@ -4,7 +4,15 @@
 <section class="panel">
   <div class="section-heading"><div><p class="eyebrow">Daily automation</p><h2>Schedule</h2></div><span id="schedule-status-badge" class="badge muted">…</span></div>
   <p class="hint" id="schedule-source">Loading the booking host's latest report…</p>
-  <p class="hint">Last updated: <strong id="schedule-last-updated">—</strong> · Booking host last seen: <strong id="schedule-host-last-seen">—</strong></p>
+  <div id="schedule-laptop-activity" class="laptop-activity unknown" role="status" aria-live="polite">
+    <div class="laptop-activity-heading">
+      <span class="laptop-activity-label">Laptop activity</span>
+      <span id="schedule-laptop-state" class="laptop-activity-state">Checking…</span>
+    </div>
+    <strong id="schedule-host-last-seen" class="laptop-activity-time">—</strong>
+    <span id="schedule-host-age" class="laptop-activity-detail">Waiting for the latest check-in.</span>
+  </div>
+  <p class="hint">Schedule report last updated: <strong id="schedule-last-updated">—</strong></p>
   <div id="schedule-warning"></div>
   <div class="metrics-grid">
     <div class="metric"><span>Submission</span><strong id="schedule-submission">—</strong></div>

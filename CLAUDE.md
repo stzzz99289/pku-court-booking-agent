@@ -113,7 +113,7 @@ Scheduled workers use durable worker-specific browser profiles, seeded once
 from the corresponding per-user profile without disposable Chromium caches,
 so duplicate workers for one account never open the same Chromium profile
 concurrently and seeding stays out of the critical path.
-The Windows one-shot task refuses duplicate or late launches. Its eight workers
+The Windows one-shot task refuses duplicate or late launches. Its configured workers
 start at 11:57 for the 12:00 release. The production server is display-only
 for scheduled booking in external mode.
 
