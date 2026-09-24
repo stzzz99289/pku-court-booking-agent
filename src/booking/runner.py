@@ -428,11 +428,17 @@ def _is_site_rejection(result: BookingResult) -> bool:
 # throttles the whole account ("验证码次数超出限制，请稍后再操作！"); re-walking and
 # re-submitting only deepens the throttle, so this is terminal, not a retry.
 _CAPTCHA_RATE_LIMIT_TEXT = "验证码次数超出限制"
+_CAPTCHA_INVALID_TEXT = "验证码非法校验"
 
 
 def _is_captcha_rate_limited(result: BookingResult) -> bool:
     """True if the rejection is the site's captcha rate-limit throttle."""
     return not result.success and _CAPTCHA_RATE_LIMIT_TEXT in result.message
+
+
+def _is_invalid_captcha_rejection(result: BookingResult) -> bool:
+    """True when PKU rejected the submitted click coordinates."""
+    return not result.success and _CAPTCHA_INVALID_TEXT in result.message
 
 
 # Safety cap on how many times we refresh and re-walk the priority list. The
@@ -444,6 +450,9 @@ _MAX_REFRESH_ATTEMPTS = 20
 # rendered). Counted independently from `_MAX_REFRESH_ATTEMPTS` so a
 # pathologically slow page still bails out instead of looping forever.
 _MAX_TRANSIENT_RETRIES = 3
+# One fresh challenge after an invalid click is useful; more rapid submissions
+# trip PKU's server-side captcha throttle and hide the original problem.
+_MAX_INVALID_CAPTCHA_RETRIES = 1
 
 
 async def _attempt_book_from_priority_list(
@@ -647,6 +656,7 @@ async def run(
             else:
                 last_failure: BookingResult | None = None
                 transient_attempts = 0
+                invalid_captcha_retries = 0
                 for refresh_attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
                     stage = f"booking_attempt_{refresh_attempt}"
                     if refresh_attempt > 1:
@@ -705,6 +715,22 @@ async def run(
                                         "only deepen the throttle.", result.message)
                             out = result
                             break
+                        if _is_invalid_captcha_rejection(result):
+                            if invalid_captcha_retries >= _MAX_INVALID_CAPTCHA_RETRIES:
+                                log.warning(
+                                    "Captcha coordinates rejected again — aborting after %d "
+                                    "retry to avoid PKU's rate limit.",
+                                    invalid_captcha_retries,
+                                )
+                                out = result
+                                break
+                            invalid_captcha_retries += 1
+                            log.warning(
+                                "Captcha coordinates rejected — retrying once with a fresh "
+                                "challenge (%d/%d).",
+                                invalid_captcha_retries, _MAX_INVALID_CAPTCHA_RETRIES,
+                            )
+                            continue
                         log.info("Slot %s:00 rejected by site (%s). Refreshing to re-walk priority list.",
                                  chosen_hour, result.message)
                         continue

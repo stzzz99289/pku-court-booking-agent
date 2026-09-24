@@ -4,8 +4,11 @@ import asyncio
 import json
 import logging
 import re
+import struct
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from playwright.async_api import Page
 
@@ -16,6 +19,7 @@ log = logging.getLogger(__name__)
 
 
 _DEBUG_DUMP_DIR = Path("debugging")
+_CAPTCHA_FAILURE_DIR = _DEBUG_DUMP_DIR / "captcha_failures"
 
 
 # JS that lists every visible modal-/dialog-like element on the page. Used by
@@ -735,6 +739,112 @@ _CAPTCHA_OUTCOME_WAIT_MS = 5_000
 # 'tradeNo=' trade URL. The popup can open blank and navigate a beat later.
 _PAYMENT_POPUP_NAV_WAIT_MS = 15_000
 
+
+def _png_dimensions(png: bytes) -> tuple[int, int]:
+    """Return PNG pixel dimensions without adding an image-library dependency."""
+    if len(png) < 24 or png[:8] != b"\x89PNG\r\n\x1a\n" or png[12:16] != b"IHDR":
+        raise ValueError("captcha screenshot is not a valid PNG")
+    width, height = struct.unpack(">II", png[16:24])
+    if width <= 0 or height <= 0:
+        raise ValueError("captcha screenshot has invalid dimensions")
+    return width, height
+
+
+def _scale_captcha_coords(
+    coords: list[tuple[int, int]],
+    screenshot_size: tuple[int, int],
+    target_size: tuple[float, float],
+) -> list[tuple[float, float]]:
+    """Map solver screenshot pixels into PKU's challenge-coordinate space."""
+    image_width, image_height = screenshot_size
+    target_width, target_height = target_size
+    if target_width <= 0 or target_height <= 0:
+        raise ValueError("captcha image has an empty target coordinate space")
+    scaled: list[tuple[float, float]] = []
+    for x, y in coords:
+        if not (0 <= x < image_width and 0 <= y < image_height):
+            raise ValueError(
+                f"captcha solver coordinate {(x, y)} is outside "
+                f"{image_width}x{image_height} screenshot"
+            )
+        scaled.append((
+            x * target_width / image_width,
+            y * target_height / image_height,
+        ))
+    return scaled
+
+
+def _save_captcha_failure(
+    png: bytes,
+    *,
+    instruction: str,
+    solver_coords: list[tuple[int, int]],
+    click_positions: list[tuple[float, float]],
+    geometry: dict[str, Any],
+    error_text: str,
+    client_state: dict[str, Any] | None = None,
+    network_events: list[dict[str, Any]] | None = None,
+) -> Path | None:
+    """Persist the rejected image and coordinate mapping for local diagnosis."""
+    try:
+        day_dir = _CAPTCHA_FAILURE_DIR / datetime.now().strftime("%Y%m%d")
+        day_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%H%M%S_%f")
+        base = day_dir / f"{stamp}_invalid"
+        base.with_suffix(".png").write_bytes(png)
+        base.with_suffix(".json").write_text(
+            json.dumps({
+                "instruction": instruction,
+                "solver_coords": solver_coords,
+                "click_positions": [
+                    {"x": round(x, 3), "y": round(y, 3)}
+                    for x, y in click_positions
+                ],
+                "geometry": geometry,
+                "client_state": client_state or {},
+                "network_events": network_events or [],
+                "site_error": error_text,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        log.warning("Rejected captcha diagnostic saved to %s.{png,json}", base)
+        return base
+    except Exception as exc:
+        log.warning("Could not save rejected captcha diagnostic: %s", exc)
+        return None
+
+
+async def _captcha_client_state(page: Page) -> dict[str, Any]:
+    """Read the click widget's visible state without reaching into Vue internals."""
+    try:
+        return await page.evaluate(
+            """() => ({
+                messages: Array.from(document.querySelectorAll('.verify-msg'))
+                    .filter(el => {
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                            s.display !== 'none' && s.visibility !== 'hidden';
+                    })
+                    .map(el => (el.innerText || '').trim()),
+                markers: Array.from(document.querySelectorAll('.point-area')).map(el => ({
+                    text: (el.innerText || '').trim(),
+                    left: el.style.left,
+                    top: el.style.top,
+                })),
+                verifyboxVisible: (() => {
+                    const el = document.querySelector('.verifybox');
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 &&
+                        s.display !== 'none' && s.visibility !== 'hidden';
+                })(),
+            })"""
+        )
+    except Exception as exc:
+        return {"diagnostic_error": str(exc)}
+
 # JS helper: walks every .ivu-modal-wrap, skips hidden ones, and returns the
 # rejection reason from the first visible '系统提示' modal. On this site the
 # rejection modal has no .ivu-modal-header — the body text itself looks like:
@@ -932,6 +1042,38 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
     # signal (it fires before the popup even navigates to its tradeNo URL), so we
     # use it to STOP touching the captcha instead of re-clicking an accepted one.
     baseline_pages = len(ctx.pages)
+    # Keep only endpoint metadata for XHR/fetch responses produced while the
+    # click widget is active. This distinguishes a failed point check from a
+    # successful widget check followed by failed business-form verification,
+    # without persisting request bodies, credentials, or captcha tokens.
+    network_events: list[dict[str, Any]] = []
+
+    def _record_response(response) -> None:
+        request = response.request
+        if request.resource_type not in {"xhr", "fetch"}:
+            return
+        parsed = urlsplit(response.url)
+        event: dict[str, Any] = {
+            "method": request.method,
+            "status": response.status,
+            "path": parsed.path,
+        }
+        if parsed.path.endswith("/reservation/order/submit"):
+            try:
+                payload = request.post_data_json
+                if isinstance(payload, dict):
+                    event["payloadKeys"] = sorted(payload)
+                    for key, value in payload.items():
+                        if "captcha" in key.lower():
+                            event[f"{key}Type"] = type(value).__name__
+                            event[f"{key}Length"] = len(value) if isinstance(value, str) else None
+            except Exception as exc:
+                event["payloadDiagnosticError"] = str(exc)
+        network_events.append(event)
+        if len(network_events) > 30:
+            del network_events[:-30]
+
+    page.on("response", _record_response)
 
     async def _accepted() -> str | None:
         """Return the name of whichever acceptance signal is present, else None."""
@@ -979,7 +1121,9 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                     )
                 except Exception as e:
                     log.warning("Captcha image not fully loaded before screenshot: %s", e)
-                png = await img_loc.screenshot()
+                # Keep screenshot pixels in CSS scale where the browser supports
+                # it, then still measure both coordinate spaces below.
+                png = await img_loc.screenshot(scale="css")
         except Exception:
             # A2a: image didn't mount within 3 s. Don't give up — refresh the
             # captcha and retry on the next attempt; the post-failure screenshot
@@ -1045,13 +1189,48 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                 consecutive_solver_errors = 0
             await asyncio.sleep(1.0)
             continue
-        dpr = await page.evaluate("window.devicePixelRatio") or 1
-        log.info("Click-captcha coords (attempt %d, dpr=%s): %s (chars: %s)", attempt + 1, dpr, coords, label)
+        screenshot_size = _png_dimensions(png)
+        box = await img_loc.bounding_box()
+        if box is None:
+            log.warning("Captcha image lost its rendered box before clicks; refreshing.")
+            await _refresh_captcha(page)
+            await asyncio.sleep(0.5)
+            continue
+        geometry = await img_loc.evaluate(
+            "el => ({"
+            "naturalWidth: el.naturalWidth, naturalHeight: el.naturalHeight,"
+            "clientWidth: el.clientWidth, clientHeight: el.clientHeight,"
+            "devicePixelRatio: window.devicePixelRatio"
+            "})"
+        )
+        rendered_size = (float(box["width"]), float(box["height"]))
+        try:
+            click_positions = _scale_captcha_coords(
+                coords, screenshot_size, rendered_size,
+            )
+        except ValueError as exc:
+            log.warning("Invalid captcha coordinate response: %s", exc)
+            await _refresh_captcha(page)
+            await asyncio.sleep(0.5)
+            continue
+        geometry.update({
+            "screenshotWidth": screenshot_size[0],
+            "screenshotHeight": screenshot_size[1],
+            "renderedWidth": rendered_size[0],
+            "renderedHeight": rendered_size[1],
+            "clickCoordinateWidth": rendered_size[0],
+            "clickCoordinateHeight": rendered_size[1],
+        })
+        log.info(
+            "Click-captcha geometry attempt %d: %s; solver=%s mapped=%s (chars: %s)",
+            attempt + 1, geometry, coords,
+            [(round(x, 2), round(y, 2)) for x, y in click_positions], label,
+        )
         try:
             with cfg.profiler.span(f"captcha_clicks[{attempt + 1}]"):
-                for x, y in coords:
+                for x, y in click_positions:
                     await img_loc.click(
-                        position={"x": x / dpr, "y": y / dpr},
+                        position={"x": x, "y": y},
                         timeout=_CAPTCHA_CLICK_TIMEOUT_MS,
                     )
                     await asyncio.sleep(0.1)
@@ -1085,6 +1264,24 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                     return None
                 error_text = await _read_system_error_modal(page)
                 if error_text:
+                    if "验证码非法校验" in error_text:
+                        client_state = await _captcha_client_state(page)
+                        log.warning(
+                            "Captcha rejection client state: %s; recent XHR/fetch: %s",
+                            client_state,
+                            network_events[-8:],
+                        )
+                        _save_captcha_failure(
+                            png,
+                            instruction=instruction,
+                            solver_coords=coords,
+                            click_positions=click_positions,
+                            geometry=geometry,
+                            error_text=error_text,
+                            client_state=client_state,
+                            network_events=network_events[-30:],
+                        )
+                        await _dump_post_submit_diagnostics(page, "captcha_invalid")
                     return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})
         log.warning("Click-captcha still visible after attempt %d/%d, retrying.",
                     attempt + 1, _BOOKING_CAPTCHA_MAX_RETRIES)
