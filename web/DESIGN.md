@@ -1,5 +1,9 @@
 ## PKU Court Booking — Web Control Panel: Design
 
+Historical design record: the current Orders/Schedule architecture and
+external/embedded scheduler modes are documented in `CLAUDE.md` and `README.md`.
+The three-tab descriptions below record the original implementation.
+
 A small self-hosted FastAPI control panel that wraps the existing CLI agent
 (`src/booking/`) so a single user can:
 

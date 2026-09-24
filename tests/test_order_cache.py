@@ -15,15 +15,15 @@ from web.backend.order_cache import OrderCacheService, compute_next_order_refres
 
 
 class OrderCacheTests(unittest.TestCase):
-    def test_next_refresh_is_today_before_eight(self) -> None:
-        now = datetime(2026, 9, 5, 7, 30)
+    def test_next_refresh_is_today_before_thirteen(self) -> None:
+        now = datetime(2026, 9, 5, 12, 30)
         actual = datetime.fromtimestamp(compute_next_order_refresh(now))
-        self.assertEqual(actual, datetime(2026, 9, 5, 8, 0))
+        self.assertEqual(actual, datetime(2026, 9, 5, 13, 0))
 
-    def test_next_refresh_is_tomorrow_at_or_after_eight(self) -> None:
-        now = datetime(2026, 9, 5, 8, 0)
+    def test_next_refresh_is_tomorrow_at_or_after_thirteen(self) -> None:
+        now = datetime(2026, 9, 5, 13, 0)
         actual = datetime.fromtimestamp(compute_next_order_refresh(now))
-        self.assertEqual(actual, datetime(2026, 9, 6, 8, 0))
+        self.assertEqual(actual, datetime(2026, 9, 6, 13, 0))
 
     def test_cache_round_trip_and_invalid_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

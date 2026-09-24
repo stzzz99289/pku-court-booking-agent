@@ -34,10 +34,11 @@ Two-file config per set with deep merge (user values win over site defaults).
 There are three config sets on disk:
 
 - `config/cli/{user_config,site_config}.yaml` — used by `python main.py`.
-- `config/webapp/test/{user_config,site_config}.yaml` + shared
-  `config/webapp/accounts.yaml` — used by the webapp's "Run Booking" tab.
-- `config/webapp/scheduled/{user_config,site_config}.yaml` + same
-  `accounts.yaml` — used by the webapp's daily scheduled task.
+- `config/webapp/scheduled/{user_config,site_config}.yaml` + shared
+  `config/webapp/accounts.yaml` — the laptop's scheduled-booking source of
+  truth and the server's order-query account list.
+- `config/webapp/test/` is a legacy one-off set; the dashboard no longer has a
+  booking page. CLI one-off tests remain available.
 
 In the webapp pairs, credentials live only in `accounts.yaml`; each `worker`'s
 `user:` field references a `name` from accounts, and the loader errors on
@@ -81,7 +82,9 @@ web/
     auth.py                 ← single-user login (PBKDF2 + signed cookie)
     config_loader.py        ← resolves the test/scheduled split-config sets
     jobs.py                 ← in-process job manager + `get_booking_lock()`
-    scheduler.py            ← singleton daily-fire background task
+    scheduler.py            ← reusable daily booking worker engine
+    local_schedule.py       ← one-shot Windows Task Scheduler entry point
+    schedule_sync.py        ← private SSH config/report/heartbeat transport
     templates/, static/     ← Jinja2 + vanilla JS, no build step
 ```
 
@@ -95,29 +98,42 @@ Two run modes, both require login:
 Single trusted user. Credentials live in `config/webapp/auth.yaml`
 (gitignored) or env (`WEBAPP_USER`, `WEBAPP_PASSWORD_HASH`, `WEBAPP_SECRET`).
 Generate a hash with `python -m web.backend.auth hash` and a session secret
-with `python -m web.backend.auth secret`. The three tabs are Users & Orders,
-Run Booking (test), and Scheduled Task.
+with `python -m web.backend.auth secret`. The dashboard has Orders and Schedule
+pages. Orders are queried by the server at 13:00 and can be refreshed manually;
+there is no dashboard booking endpoint.
 
-**Concurrency.** Test runs and scheduled runs both acquire a single
-`asyncio.Lock` from `jobs.get_booking_lock()`, so they cannot overlap on the
-shared per-user `.browser_profile/user_<name>/`. The "Run now" button on Tab 2
-is also greyed (and the API rejects with HTTP 409) while
-`scheduler.in_no_test_window()` is true — the window opens
-`scheduled_prep_seconds + 60s` before fire and closes when the run finishes.
-Chromium startup is limited to two concurrent launches inside the webapp so a
-burst of scheduled workers cannot starve a small server before navigation.
+`SCHEDULE_EXECUTION_MODE=external` (default) makes the webapp display reports
+uploaded by a booking laptop. `SCHEDULE_EXECUTION_MODE=embedded` retains the
+original in-process scheduler for a sufficiently powerful Linux host. Run
+only one booking host at a time.
+
+**Concurrency.** Order refreshes acquire `jobs.get_booking_lock()` to protect
+their browser profiles. Chromium startup is limited to two concurrent launches.
 Scheduled workers use durable worker-specific browser profiles, seeded once
 from the corresponding per-user profile without disposable Chromium caches,
 so duplicate workers for one account never open the same Chromium profile
 concurrently and seeding stays out of the critical path.
-The current 2-vCPU/3.6-GiB production host should run no more than eight
-scheduled workers; its scheduled config starts three minutes before noon so
-all browsers can be prepared under that bounded launch rate.
+The Windows one-shot task refuses duplicate or late launches. Its eight workers
+start at 11:57 for the 12:00 release. The production server is display-only
+for scheduled booking in external mode.
 
-**Last-run persistence.** The scheduler writes `data/scheduled_last_run.log`
-(plain text, truncated each run) and `data/scheduled_last_run.json` (sidecar
-with timing + result summary), so the Scheduled Task tab still shows the
-previous run's log after a webapp restart.
+**Last-run persistence and sync.** The booking host writes
+`data/scheduled_last_run.{log,json}`, replacing the previous run. Five minutes
+after workers finish, the laptop uploads a redacted report via passwordless
+SSH. The server atomically stores one `data/schedule_display.json` and the
+latest `data/laptop_heartbeat.json`. Check-ins run at 00:00, 04:00, 08:00,
+11:45, 16:00, and 20:00 local time; 11:45 syncs the private scheduled configs
+before noon preparation. The server marks a heartbeat stale after five hours
+and shows a missing-run warning after 12:15 when no completed report arrived.
+It cannot directly query a sleeping or NATed laptop.
+
+`scripts/install_windows_schedule.ps1` installs both tasks for the signed-in
+Windows user. Win+L preserves that session; sleep or sign-out prevents an
+interactive task from running. The tasks use the repo `.venv` and UTF-8 mode.
+`scripts/deploy_code.ps1` deploys only committed code by fast-forward Git,
+restarts the webapp, and syncs private scheduled configs. The SSH destination
+can be overridden with `SCHEDULE_SYNC_SSH` and `SCHEDULE_SYNC_REMOTE_DIR`.
+Re-run the Windows task installer when scheduled time or prep seconds change.
 
 **Crash diagnostics.** An unexpected runner exception captures a best-effort
 full-page screenshot, HTML snapshot, visible-dialog summary, stage, and
@@ -125,9 +141,19 @@ traceback under `debugging/crashes/YYYYMMDD/` before its browser context is
 closed. Capture operations have short timeouts and run only after a worker has
 already crashed; the directory is private and ignored by Git.
 
-**Order cache.** The webapp refreshes all users' paid orders every day at
-08:00 and persists the combined result in `data/orders_cache.json`. The Users
-& Orders tab loads this cache immediately, shows its last update time, and can
+Rejected booking CAPTCHAs save the attempted image and coordinate/geometry
+metadata, visible widget state, and redacted endpoint metadata under
+`debugging/captcha_failures/YYYYMMDD/`. Solver pixels are mapped to the rendered
+image box instead of assuming device pixels equal CSS pixels, and only one fresh
+challenge is attempted after an invalid-coordinate response to avoid PKU's rate
+limit. Keep the Playwright version pinned in `requirements.txt` so Windows and
+Linux use the same Chromium generation. Scheduled profiling files retain a
+seven-day window. Crash evidence and CAPTCHA diagnostics are never pruned
+automatically.
+
+**Order cache.** The server refreshes all users' paid orders every day at
+13:00 and persists the combined result in `data/orders_cache.json`. The Orders
+page loads this cache immediately, shows its last update time, and can
 start the same refresh manually. Order refreshes acquire the shared booking
 lock because they reuse the same persistent browser profiles. During a refresh,
 current and future normal paid orders receive mobile-card proof screenshots in
@@ -138,11 +164,10 @@ accepted; if an established user still returns zero rows, the webapp preserves
 that user's previous cache instead of erasing it. Images are exposed only
 through the authenticated webapp.
 
-**Session verification.** The Users tab shows the last time the live site
-accepted each account's session. Successful fresh logins and confirmed access
-to protected reservation/order pages touch a marker inside that user's
-persistent browser profile. This is historical evidence, not a prediction of
-future session validity; the booking flow still re-authenticates when needed.
+**Session verification.** The Orders page shows the booking host's latest
+verification time for each account. In external mode this comes from the
+laptop's report; in embedded mode it comes from server browser profiles.
+It is historical evidence, not a prediction of future session validity.
 
 ## Selector Discovery Workflow
 

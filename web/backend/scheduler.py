@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import copy
 import json
 import logging
 import shutil
@@ -43,6 +42,7 @@ META_FILE = DATA_DIR / "scheduled_last_run.json"
 # user_config. One file per fire date so multiple days can be compared by
 # eyeballing `data/profiles/scheduled_YYYYMMDD.json`.
 PROFILES_DIR = DATA_DIR / "profiles"
+PROFILE_RETENTION_DAYS = 7
 
 # Persistent profiles accumulate hundreds of megabytes of disposable Chromium
 # caches. Worker seeding needs authentication/session state, not those caches;
@@ -321,6 +321,7 @@ class Scheduler:
                 log.warning("scheduler: could not write %s: %s", META_FILE, e)
             if worker_profiles:
                 self._write_profiles(started_at, finished_at, worker_profiles)
+            self._prune_profiles()
             self.state = "waiting"
             self.current_logs = None  # waiting view will re-read from disk
 
@@ -353,6 +354,18 @@ class Scheduler:
             log.info("scheduler: wrote profile dump to %s", path)
         except Exception as e:
             log.warning("scheduler: could not write profile dump: %s", e)
+
+    @staticmethod
+    def _prune_profiles() -> None:
+        """Keep seven fire dates of scheduler profiles; leave crash evidence alone."""
+        cutoff = datetime.now().date() - timedelta(days=PROFILE_RETENTION_DAYS - 1)
+        for path in PROFILES_DIR.glob("scheduled_????????.json"):
+            try:
+                fire_date = datetime.strptime(path.stem.removeprefix("scheduled_"), "%Y%m%d").date()
+                if fire_date < cutoff:
+                    path.unlink()
+            except (OSError, ValueError) as exc:
+                log.warning("scheduler: could not prune profile %s: %s", path, exc)
 
     @staticmethod
     def _serialize_result(r: BookingResult) -> dict[str, Any]:

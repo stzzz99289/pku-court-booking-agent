@@ -2,47 +2,30 @@
 {% block title %}Scheduled Task{% endblock %}
 {% block content %}
 <section class="panel">
-  <div class="section-heading"><div><p class="eyebrow">Daily automation</p><h2>Scheduled task</h2></div><span id="schedule-status-badge" class="badge muted">…</span></div>
-  <p class="hint">A single daily task, always on for the lifetime of this webapp process.
-    Edit <code>config/webapp/scheduled/</code> + <code>accounts.yaml</code> and restart to
-    reconfigure. Test runs from the Run Booking tab are blocked while this task is running
-    or in its prep window.</p>
-
+  <div class="section-heading"><div><p class="eyebrow">Daily automation</p><h2>Schedule</h2></div><span id="schedule-status-badge" class="badge muted">…</span></div>
+  <p class="hint" id="schedule-source">Loading the booking host's latest report…</p>
+  <p class="hint">Last updated: <strong id="schedule-last-updated">—</strong> · Booking host last seen: <strong id="schedule-host-last-seen">—</strong></p>
+  <div id="schedule-warning"></div>
   <div class="metrics-grid">
-    <div class="metric"><span>Submission</span><strong>{{ scheduled_time[0:2] }}:{{ scheduled_time[2:4] }}:{{ scheduled_time[4:6] }}</strong></div>
-    <div class="metric"><span>Prep window</span><strong>{{ scheduled_prep_seconds }}s early</strong></div>
-    <div class="metric metric-wide"><span>Venue</span><strong>{% if venue_name %}{{ venue_name }} ({{ venue_id }}){% else %}{{ venue_id or "?" }}{% endif %}</strong></div>
-    <div class="metric metric-wide"><span>Next fire</span><strong id="schedule-next-fire">…</strong></div>
-    <div class="metric countdown"><span>Countdown</span><strong id="schedule-countdown">…</strong></div>
+    <div class="metric"><span>Submission</span><strong id="schedule-submission">—</strong></div>
+    <div class="metric"><span>Prep window</span><strong id="schedule-prep">—</strong></div>
+    <div class="metric metric-wide"><span>Venue</span><strong id="schedule-venue">—</strong></div>
+    <div class="metric metric-wide"><span>Next fire</span><strong id="schedule-next-fire">—</strong></div>
+    <div class="metric countdown"><span>Countdown</span><strong id="schedule-countdown">—</strong></div>
   </div>
-
-  <h3 class="subhead">Workers ({{ workers|length }})</h3>
-  {% if workers %}
+  <h3 class="subhead">Workers (<span id="schedule-worker-count">0</span>)</h3>
   <div class="table-wrap">
-  <table class="data mobile-cards">
-    <thead><tr><th>User</th><th>Date</th><th>Slot priority</th><th>Court priority</th></tr></thead>
-    <tbody>
-      {% for w in workers %}
-      <tr><td data-label="User"><strong>{{ w.user }}</strong></td><td data-label="Date">{{ w.date }}</td>
-        <td data-label="Slot priority"><span class="tag-list">{% for h in w.start_time_list %}<code class="hour-tag">{{ h }}:00</code>{% endfor %}</span></td>
-        <td data-label="Court priority"><span class="tag-list">{% if w.court_priority %}{% for c in w.court_priority %}<code class="hour-tag">#{{ c }}</code>{% endfor %}{% else %}<span class="muted">default</span>{% endif %}</span></td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+    <table class="data mobile-cards">
+      <thead><tr><th>User</th><th>Date</th><th>Slot priority</th><th>Court priority</th></tr></thead>
+      <tbody id="schedule-workers"><tr><td colspan="4" class="muted">Waiting for a schedule report.</td></tr></tbody>
+    </table>
   </div>
-  <p class="hint">Court priority is 0-based court indices (<code>#0</code> = 1号); listed
-    courts are preferred first, then the rest in natural order. <span class="muted">default</span>
-    = natural order <code>#0, #1, #2, …</code></p>
-  {% else %}
-    <p class="hint">No workers configured.</p>
-  {% endif %}
+  <p class="hint">Court priority uses zero-based indices (<code>#0</code> = 1号). Default means natural order.</p>
 </section>
-
 <section class="panel">
-  <div class="section-heading"><div><p class="eyebrow">Latest activity</p><h2>Run log</h2></div></div>
-  <p class="hint">Live tail while running; otherwise the previous run's complete log
-    (loaded from <code>data/scheduled_last_run.log</code>, persists across restarts).</p>
+  <div class="section-heading"><div><p class="eyebrow">Latest activity</p><h2>Last run</h2></div></div>
+  <p class="hint">Only the latest run result and log are kept on the dashboard.</p>
   <div id="schedule-last-run-summary"></div>
-  <div id="schedule-log" class="log-tail">(no run yet)</div>
+  <div id="schedule-log" class="log-tail">(no local run reported yet)</div>
 </section>
 {% endblock %}

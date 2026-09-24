@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Users &amp; Orders{% endblock %}
+{% block title %}Orders{% endblock %}
 {% block content %}
 <section class="panel">
   <div class="section-heading"><div><p class="eyebrow">Accounts</p><h2>Users</h2></div><span class="count-pill">{{ users|length }} configured</span></div>
@@ -33,7 +33,7 @@
       <option value="">(all venues)</option>
     </select></label>
   </div>
-  <p class="hint orders-cache-note">Automatically refreshed daily at 08:00. <span id="orders-last-update">Loading saved orders…</span></p>
+  <p class="hint orders-cache-note">Automatically refreshed daily at 13:00. <span id="orders-last-update">Loading saved orders…</span></p>
   <div id="orders-status"></div>
   <div class="log-tail" id="orders-log" style="display:none"></div>
   <div id="orders-results"></div>

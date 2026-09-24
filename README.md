@@ -3,7 +3,8 @@
 Automated booking for the Peking University venue reservation system
 (<https://epe.pku.edu.cn/venue/home>). Logs in with a saved Playwright profile,
 opens the venue page, fills the form, solves the booking captcha, and submits —
-either on demand from the CLI or on a daily schedule from the bundled web UI.
+either on demand from the CLI or on a daily Windows or Linux schedule. The
+server webapp displays orders and the latest scheduled-run report.
 
 The flow stops before payment: the agent reserves the court; you pay manually
 in the WeChat / Alipay popup afterwards.
@@ -29,11 +30,9 @@ sudo apt install fonts-noto-cjk
 # 4. fill in your credentials and booking targets — see "Configuration" below
 cp config/cli/user_config.example.yaml      config/cli/user_config.yaml
 cp config/webapp/accounts.example.yaml      config/webapp/accounts.yaml
-cp config/webapp/test/user_config.example.yaml      config/webapp/test/user_config.yaml
 cp config/webapp/scheduled/user_config.example.yaml config/webapp/scheduled/user_config.yaml
 cp config/webapp/auth.example.yaml                  config/webapp/auth.yaml
 $EDITOR config/cli/user_config.yaml config/webapp/accounts.yaml \
-        config/webapp/test/user_config.yaml \
         config/webapp/scheduled/user_config.yaml
 ```
 
@@ -69,17 +68,36 @@ The webapp has two deployment modes — **local** (your laptop) and **remote**
 (a server with a public IP behind an HTTPS proxy). Both modes require login;
 auth setup is the same for both.
 
-The three tabs are:
+The two pages are:
 
-- **Users & Orders** — lists users from `config/webapp/accounts.yaml` and
-  cached paid orders. The cache refreshes daily at 08:00, survives restarts,
+- **Orders** — lists users from `config/webapp/accounts.yaml` and
+  cached paid orders. The server cache refreshes daily at 13:00, survives restarts,
   and can also be refreshed manually.
-- **Run Booking** — one-off headless booking, pre-filled from
-  `config/webapp/test/user_config.yaml`. The "Run now" button is greyed out
-  while the scheduled task is running or in its prep window.
-- **Scheduled Task** — singleton daily task driven by
-  `config/webapp/scheduled/`. Edit the YAML and restart the webapp to
-  reconfigure. Last run's full log persists across restarts.
+- **Schedule** — shows the scheduled configuration, latest worker results and
+  log, last upload time, and the booking host's last heartbeat.
+
+By default, `SCHEDULE_EXECUTION_MODE=external`: Windows performs the daily
+booking while the server queries orders and displays uploaded run reports. Set
+`SCHEDULE_EXECUTION_MODE=embedded` on a capable Linux server to run the same
+daily booking scheduler inside the webapp. Enable only one booking host.
+
+On Windows, install the two tasks with `./scripts/install_windows_schedule.ps1`.
+The booking task starts at 11:57 for the 12:00 release. Check-ins and private
+scheduled-config sync run at 00:00, 04:00, 08:00, 11:45, 16:00, and 20:00.
+Five minutes after the workers finish, the laptop replaces the server's last
+run report. The laptop must be awake and signed in; Win+L is fine, but sleep
+and sign-out prevent the interactive task.
+
+After editing scheduled configs, sync them immediately with
+`./.venv/Scripts/python.exe -X utf8 -m web.backend.schedule_sync heartbeat`.
+Only `accounts.yaml` and the two `scheduled/*.yaml` files are copied. The
+server's `auth.yaml` remains server-specific. To deploy code, review and commit
+it first, then run `./scripts/deploy_code.ps1`. It pushes committed `main`,
+fast-forwards the server, restarts the webapp, and syncs the private configs.
+The SSH destination can be changed with `SCHEDULE_SYNC_SSH` and
+`SCHEDULE_SYNC_REMOTE_DIR`. Re-run `install_windows_schedule.ps1` if you change
+`scheduled_time` or `scheduled_prep_seconds`; it calculates the Windows task
+trigger from those values.
 
 #### 1. Set up the login account
 
@@ -189,10 +207,9 @@ Step-by-step on the server:
 # 1. Clone, create venv, install deps, install Chromium — same as the
 #    "Quick start" section above.
 
-# 2. scp your *.yaml configs from your laptop to the server (do NOT commit
-#    them). At minimum:
+# 2. Sync private scheduled configs from the laptop (do NOT commit them).
+#    The server's auth.yaml is installed separately. Required booking files:
 #    config/webapp/accounts.yaml
-#    config/webapp/test/user_config.yaml
 #    config/webapp/scheduled/user_config.yaml
 #    config/webapp/auth.yaml         (or set the env vars below)
 #    config/webapp/scheduled/site_config.yaml  (if you've customized it)
@@ -205,7 +222,7 @@ Step-by-step on the server:
 rsync -av .browser_profile/ user@server:/path/to/pku-court-booking-agent/.browser_profile/
 
 # 4. Start the webapp in remote mode. It still listens on 127.0.0.1.
-WEBAPP_MODE=remote python -m web.backend.app
+WEBAPP_MODE=remote SCHEDULE_EXECUTION_MODE=external python -m web.backend.app
 ```
 
 Then put a TLS proxy in front. Minimal `Caddyfile`:
@@ -232,6 +249,7 @@ After=network.target
 User=tianze
 WorkingDirectory=/home/tianze/pku-court-booking-agent
 Environment=WEBAPP_MODE=remote
+Environment=SCHEDULE_EXECUTION_MODE=external
 # Either rely on config/webapp/auth.yaml, or set these and skip auth.yaml:
 # Environment=WEBAPP_USER=admin
 # Environment=WEBAPP_PASSWORD_HASH=pbkdf2_sha256$200000$...$...
@@ -278,11 +296,11 @@ config/
     accounts.example.yaml
     auth.yaml               (gitignored — webapp login)
     auth.example.yaml
-    test/                   ← Tab 2 "Run Booking"
+    test/                   ← legacy one-off config, not used by dashboard
       user_config.yaml      (gitignored)
       user_config.example.yaml
       site_config.yaml
-    scheduled/              ← Tab 3 "Scheduled Task"
+    scheduled/              ← laptop booking and server order-query config
       user_config.yaml      (gitignored)
       user_config.example.yaml
       site_config.yaml
@@ -291,7 +309,7 @@ config/
 `site_config.yaml` (per set) holds selectors, base URL, browser settings, and
 defaults. `user_config.yaml` (per set) holds workers — which user books which
 slot on which date. The webapp uses `accounts.yaml` as the shared source for
-credentials so neither test nor scheduled YAMLs need passwords.
+credentials so the scheduled YAML does not need passwords.
 
 For details on selectors, the captcha pipeline, login methods, and the
 stage-gate model, see `CLAUDE.md`.

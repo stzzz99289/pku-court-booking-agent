@@ -1,4 +1,4 @@
-"""Persistent order cache with a daily 08:00 background refresh."""
+"""Persistent order cache with a daily 13:00 background refresh."""
 from __future__ import annotations
 
 import asyncio
@@ -23,12 +23,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 ORDER_CACHE_FILE = DATA_DIR / "orders_cache.json"
 ORDER_PROOF_DIR = DATA_DIR / "order_proofs"
-ORDER_REFRESH_HOUR = 8
+ORDER_REFRESH_HOUR = 13
 DEFAULT_ORDER_LIMIT = 10
 
 
 def compute_next_order_refresh(now: datetime | None = None) -> float:
-    """Return the next local 08:00 refresh as epoch seconds."""
+    """Return the next local 13:00 refresh as epoch seconds."""
     now = now or datetime.now()
     refresh = now.replace(hour=ORDER_REFRESH_HOUR, minute=0, second=0, microsecond=0)
     if refresh <= now:
@@ -131,7 +131,7 @@ class OrderCacheService:
         return job
 
     async def _fetch_and_store(self, job: Job, limit: int) -> dict[str, Any]:
-        base = load_set("test")
+        base = load_set("scheduled")
         if not base.users:
             raise RuntimeError("no users configured")
 
@@ -233,7 +233,7 @@ class OrderCacheService:
             except (TypeError, ValueError, OSError):
                 attempted_today = False
 
-            # Catch up immediately after a restart if today's 08:00 refresh
+            # Catch up immediately after a restart if today's 13:00 refresh
             # was missed, but make only one automatic attempt per day.
             if now >= today_refresh and not attempted_today:
                 job = self.start_refresh()

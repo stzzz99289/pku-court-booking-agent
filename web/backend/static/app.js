@@ -460,13 +460,45 @@ async function pollSchedule() {
 function renderScheduleStatus(data) {
   const badge = document.getElementById("schedule-status-badge");
   badge.textContent = data.state;
-  badge.className = "badge " + (data.state === "running" ? "run" : "ok");
+  badge.className = "badge " + (data.state === "running" || data.state === "cooling_down"
+    ? "run" : data.state === "no report today" || data.state === "failed" ? "err" : "ok");
+
+  const fmt = (epoch) => epoch ? new Date(epoch * 1000).toLocaleString() : "—";
+  document.getElementById("schedule-last-updated").textContent = fmt(data.last_updated_at);
+  document.getElementById("schedule-host-last-seen").textContent = data.mode === "external"
+    ? fmt(data.laptop_last_seen_at) : "This server";
+  document.getElementById("schedule-source").textContent = data.mode === "external"
+    ? `Booking runs on ${data.laptop_host || "the laptop"}; this page shows its latest uploaded report.`
+    : "Booking runs on this server.";
+  const warning = document.getElementById("schedule-warning");
+  const messages = [];
+  if (data.mode === "external" && !data.laptop_alive) messages.push("No laptop heartbeat in the last five hours.");
+  if (data.today_report_missing) messages.push("No completed booking report has arrived today.");
+  warning.innerHTML = messages.map((message) => `<p class="result-box err">${escapeHtml(message)}</p>`).join("");
+
+  const cfg = data.config || {};
+  const submission = cfg.scheduled_time || "";
+  document.getElementById("schedule-submission").textContent = submission.length === 6
+    ? `${submission.slice(0,2)}:${submission.slice(2,4)}:${submission.slice(4,6)}` : "—";
+  document.getElementById("schedule-prep").textContent = cfg.scheduled_prep_seconds != null
+    ? `${cfg.scheduled_prep_seconds}s early` : "—";
+  document.getElementById("schedule-venue").textContent = cfg.venue_id
+    ? `${cfg.venue_name || "Venue"} (${cfg.venue_id})` : "—";
+  const workers = Array.isArray(cfg.workers) ? cfg.workers : [];
+  document.getElementById("schedule-worker-count").textContent = workers.length;
+  document.getElementById("schedule-workers").innerHTML = workers.length ? workers.map((w) => `
+    <tr><td data-label="User"><strong>${escapeHtml(w.user || "")}</strong></td>
+      <td data-label="Date">${escapeHtml(w.date || "")}</td>
+      <td data-label="Slot priority"><span class="tag-list">${(w.start_time_list || []).map((h) => `<code class="hour-tag">${escapeHtml(h)}:00</code>`).join("")}</span></td>
+      <td data-label="Court priority"><span class="tag-list">${(w.court_priority || []).length
+        ? w.court_priority.map((c) => `<code class="hour-tag">#${escapeHtml(c)}</code>`).join("")
+        : '<span class="muted">default</span>'}</span></td></tr>
+  `).join("") : '<tr><td colspan="4" class="muted">Waiting for a schedule report.</td></tr>';
 
   scheduleNextFireEpoch = data.next_fire || null;
   const nextFireEl = document.getElementById("schedule-next-fire");
   nextFireEl.textContent = scheduleNextFireEpoch
-    ? new Date(scheduleNextFireEpoch * 1000).toLocaleString()
-    : "(computing…)";
+    ? fmt(scheduleNextFireEpoch) : "—";
 
   const log = document.getElementById("schedule-log");
   const text = (data.logs && data.logs.length) ? data.logs.join("\n") : "(no run yet)";
