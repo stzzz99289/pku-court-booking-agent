@@ -24,7 +24,7 @@ from src.booking.session_verification import last_session_verified
 from src.booking.site_constants import VENUES
 from web.backend.config_loader import ACCOUNTS_PATH, WEBAPP_CONFIG_DIR, load_set
 from web.backend.jobs import configure_secret_redaction, redact_sensitive_text, redact_sensitive_value
-from web.backend.scheduler import DATA_DIR, LOG_FILE, META_FILE, compute_next_fire
+from web.backend.scheduler import DATA_DIR, LOG_FILE, META_FILE, Scheduler, compute_next_fire
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_FILE = DATA_DIR / "schedule_display.json"
@@ -191,6 +191,9 @@ def receive(kind: str, raw: bytes) -> None:
         _validate_heartbeat(data)
         data["received_at"] = time.time()
         _atomic_json(HEARTBEAT_FILE, data)
+        # The external server no longer fires bookings, so its old profile
+        # dumps need this inexpensive check-in to age out after seven days.
+        Scheduler._prune_profiles()
     elif kind == "config":
         _receive_config(data)
     else:
