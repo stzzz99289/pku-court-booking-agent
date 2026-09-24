@@ -1,6 +1,6 @@
 """Private SSH transport for laptop schedule reports and scheduled configs.
 
-The server accepts only three fixed payload types over an existing SSH login.
+The server accepts fixed payload types over an existing SSH login.
 No dashboard upload endpoint or booking credentials are exposed to browsers.
 """
 from __future__ import annotations
@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -29,12 +30,14 @@ from web.backend.scheduler import DATA_DIR, LOG_FILE, META_FILE, Scheduler, comp
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_FILE = DATA_DIR / "schedule_display.json"
 HEARTBEAT_FILE = DATA_DIR / "laptop_heartbeat.json"
+CHECKIN_FILE = DATA_DIR / "laptop_checkin_request.json"
 UPLOADED_FILE = DATA_DIR / "schedule_uploaded.json"
 SHANGHAI = timezone(timedelta(hours=8))
 SSH_TARGET = os.environ.get("SCHEDULE_SYNC_SSH", "tianze@43.173.124.100")
 REMOTE_PROJECT = os.environ.get("SCHEDULE_SYNC_REMOTE_DIR", "~/pku-court-booking-agent")
 MAX_PAYLOAD_BYTES = 12_000_000
 HEARTBEAT_STALE_SECONDS = 5 * 3600
+CHECKIN_TIMEOUT_SECONDS = 180
 CONFIG_FILES = {
     "accounts": ACCOUNTS_PATH,
     "workers": WEBAPP_CONFIG_DIR / "scheduled" / "user_config.yaml",
@@ -150,6 +153,55 @@ def _validate_heartbeat(data: dict[str, Any]) -> None:
         raise ValueError("heartbeat has no timestamp")
 
 
+def _validate_checkin(data: dict[str, Any]) -> None:
+    if data.get("schema") != 1 or data.get("source") != "laptop":
+        raise ValueError("unsupported on-demand check-in")
+    request_id = data.get("checkin_request_id")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise ValueError("invalid check-in request ID")
+    if not isinstance(data.get("sent_at"), (int, float)):
+        raise ValueError("check-in has no timestamp")
+    if not isinstance(data.get("host"), str) or len(data["host"]) > 255:
+        raise ValueError("invalid check-in host")
+
+
+def checkin_status() -> dict[str, Any]:
+    """Public state of the most recent on-demand request, without its token."""
+    request = _read_json(CHECKIN_FILE) or {}
+    if not request:
+        return {"state": "none"}
+    state = "responded" if request.get("responded_at") else (
+        "timed_out" if time.time() >= request.get("expires_at", 0) else "pending"
+    )
+    return {
+        "state": state,
+        "requested_at": request.get("requested_at"),
+        "responded_at": request.get("responded_at"),
+        "expires_at": request.get("expires_at"),
+    }
+
+
+def request_checkin() -> dict[str, Any]:
+    """Coalesce repeated clicks while a request is awaiting the laptop."""
+    if checkin_status()["state"] != "pending":
+        now = time.time()
+        _atomic_json(CHECKIN_FILE, {
+            "id": secrets.token_hex(16),
+            "requested_at": now,
+            "expires_at": now + CHECKIN_TIMEOUT_SECONDS,
+        })
+    return checkin_status()
+
+
+def pending_checkin_id() -> str | None:
+    request = _read_json(CHECKIN_FILE) or {}
+    if checkin_status()["state"] == "pending":
+        value = request.get("id")
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+    return None
+
+
 def _receive_config(data: dict[str, Any]) -> None:
     if data.get("schema") != 1 or not isinstance(data.get("files"), dict):
         raise ValueError("unsupported scheduled config bundle")
@@ -194,6 +246,14 @@ def receive(kind: str, raw: bytes) -> None:
         # The external server no longer fires bookings, so its old profile
         # dumps need this inexpensive check-in to age out after seven days.
         Scheduler._prune_profiles()
+    elif kind == "checkin":
+        _validate_checkin(data)
+        request = _read_json(CHECKIN_FILE) or {}
+        if data["checkin_request_id"] != request.get("id") or checkin_status()["state"] != "pending":
+            raise ValueError("check-in request is unknown or expired")
+        request["responded_at"] = time.time()
+        request["host"] = data["host"]
+        _atomic_json(CHECKIN_FILE, request)
     elif kind == "config":
         _receive_config(data)
     else:
@@ -251,20 +311,51 @@ def send_heartbeat(state: str = "idle") -> None:
     })
 
 
+def probe_checkin() -> bool:
+    """Laptop-side, lightweight outbound poll; no browser or booking work."""
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]+", SSH_TARGET):
+        raise ValueError("invalid SCHEDULE_SYNC_SSH host")
+    if not re.fullmatch(r"[A-Za-z0-9_./~-]+", REMOTE_PROJECT):
+        raise ValueError("invalid SCHEDULE_SYNC_REMOTE_DIR")
+    remote = f"cd {REMOTE_PROJECT} && .venv/bin/python -m web.backend.schedule_sync pending-checkin"
+    completed = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", SSH_TARGET, remote],
+        capture_output=True, timeout=25, check=False, text=True,
+    )
+    if completed.returncode:
+        raise RuntimeError(f"SSH check-in probe failed (exit {completed.returncode})")
+    request_id = completed.stdout.strip()
+    if not request_id:
+        return False
+    if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise ValueError("server returned an invalid check-in request ID")
+    _ssh_send("checkin", {
+        "schema": 1,
+        "source": "laptop",
+        "checkin_request_id": request_id,
+        "sent_at": time.time(),
+        "host": platform.node(),
+    })
+    return True
+
+
 def display_status() -> dict[str, Any]:
     """Read remote display state without loading booking credentials or browsers."""
     report = _read_json(REPORT_FILE) or {}
     heartbeat = _read_json(HEARTBEAT_FILE) or {}
+    checkin = _read_json(CHECKIN_FILE) or {}
     now = time.time()
-    seen = heartbeat.get("received_at")
+    heartbeat_seen = heartbeat.get("received_at")
+    on_demand_seen = checkin.get("responded_at")
+    seen = max((x for x in (heartbeat_seen, on_demand_seen) if isinstance(x, (int, float))), default=None)
     alive = isinstance(seen, (int, float)) and 0 <= now - seen < HEARTBEAT_STALE_SECONDS
     last_run = report.get("last_run") if isinstance(report.get("last_run"), dict) else None
     today = datetime.now(SHANGHAI).date()
     finished = last_run.get("finished_at") if last_run else None
     run_today = isinstance(finished, (int, float)) and datetime.fromtimestamp(finished, SHANGHAI).date() == today
     report_due = datetime.now(SHANGHAI).time() >= clock_time(12, 15)
-    heartbeat_state = heartbeat.get("state") if alive else "unknown"
-    if heartbeat_state in {"running", "cooling_down"} and now - float(seen) > 20 * 60:
+    heartbeat_state = heartbeat.get("state") if isinstance(heartbeat_seen, (int, float)) and now - heartbeat_seen < HEARTBEAT_STALE_SECONDS else "unknown"
+    if heartbeat_state in {"running", "cooling_down"} and now - float(heartbeat_seen) > 20 * 60:
         heartbeat_state = "unknown"
     missing_today = bool(report_due and not run_today and heartbeat_state not in {"running", "cooling_down"})
     if missing_today:
@@ -276,7 +367,7 @@ def display_status() -> dict[str, Any]:
     else:
         state = "waiting"
     cfg = report.get("config") if isinstance(report.get("config"), dict) else None
-    next_fire = heartbeat.get("next_fire") if alive else None
+    next_fire = heartbeat.get("next_fire") if heartbeat_state != "unknown" else None
     if cfg and (not isinstance(next_fire, (int, float)) or next_fire < now):
         try:
             s = cfg["scheduled_time"]
@@ -297,7 +388,8 @@ def display_status() -> dict[str, Any]:
         "last_report_at": report.get("received_at"),
         "laptop_last_seen_at": seen,
         "laptop_alive": alive,
-        "laptop_host": heartbeat.get("host") if heartbeat else None,
+        "laptop_host": checkin.get("host") if isinstance(on_demand_seen, (int, float)) and (not isinstance(heartbeat_seen, (int, float)) or on_demand_seen > heartbeat_seen) else heartbeat.get("host"),
+        "checkin": checkin_status(),
         "today_report_missing": missing_today,
         "config": cfg,
         "last_verified": report.get("last_verified", {}),
@@ -308,8 +400,8 @@ def display_status() -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync local booking reports to the display server")
-    parser.add_argument("command", choices=("receive", "heartbeat", "publish", "sync-config"))
-    parser.add_argument("kind", nargs="?", choices=("report", "heartbeat", "config"))
+    parser.add_argument("command", choices=("receive", "heartbeat", "publish", "sync-config", "pending-checkin", "probe-checkin", "request-checkin"))
+    parser.add_argument("kind", nargs="?", choices=("report", "heartbeat", "config", "checkin"))
     args = parser.parse_args()
     if args.command == "receive":
         if not args.kind:
@@ -328,6 +420,12 @@ def main() -> int:
         publish_report(force=True)
     elif args.command == "sync-config":
         sync_scheduled_configs()
+    elif args.command == "pending-checkin":
+        print(pending_checkin_id() or "")
+    elif args.command == "probe-checkin":
+        probe_checkin()
+    elif args.command == "request-checkin":
+        print(json.dumps(request_checkin()))
     return 0
 
 

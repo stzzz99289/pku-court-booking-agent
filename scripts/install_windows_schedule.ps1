@@ -5,10 +5,12 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $pythonExe = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $runName = 'PKU Court Booking - Daily Run'
 $heartbeatName = 'PKU Court Booking - Heartbeat'
+$probeName = 'PKU Court Booking - On-Demand Check-In'
 
 if ($Remove) {
     Unregister-ScheduledTask -TaskName $runName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $heartbeatName -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $probeName -Confirm:$false -ErrorAction SilentlyContinue
     return
 }
 
@@ -40,6 +42,17 @@ $heartbeatTriggers = @('00:00:00', '04:00:00', '08:00:00', $preflightTime, '16:0
 Register-ScheduledTask -TaskName $heartbeatName -Action $heartbeatAction `
     -Trigger $heartbeatTriggers -Principal $principal -Settings $settings -Force | Out-Null
 
-Get-ScheduledTask -TaskName $runName, $heartbeatName |
+# A one-minute SSH poll checks only for dashboard requests. It does not send a
+# heartbeat unless requested, so the six routine check-ins remain unchanged.
+$probeAction = New-ScheduledTaskAction -Execute $pythonExe `
+    -Argument '-X utf8 -m web.backend.schedule_sync probe-checkin' -WorkingDirectory $projectRoot
+$probeTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
+$probeSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+    -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName $probeName -Action $probeAction -Trigger $probeTrigger `
+    -Principal $principal -Settings $probeSettings -Force | Out-Null
+
+Get-ScheduledTask -TaskName $runName, $heartbeatName, $probeName |
     Select-Object TaskName, State, @{Name='Triggers';Expression={($_.Triggers.StartBoundary -join ', ')}} |
     Format-Table -AutoSize

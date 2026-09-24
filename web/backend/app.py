@@ -34,7 +34,7 @@ from web.backend.jobs import (  # noqa: E402
     get_job_manager,
 )
 from web.backend.order_cache import get_order_cache  # noqa: E402
-from web.backend.schedule_sync import display_status  # noqa: E402
+from web.backend.schedule_sync import display_status, request_checkin  # noqa: E402
 from web.backend.scheduler import get_scheduler  # noqa: E402
 
 # Deployment mode: "local" (default, 127.0.0.1) or "remote" (behind a TLS
@@ -362,6 +362,13 @@ async def api_schedule_status() -> JSONResponse:
     result["laptop_last_seen_at"] = None
     result["today_report_missing"] = False
     return JSONResponse(result)
+
+
+@app.post("/api/schedule/check-in")
+async def api_schedule_checkin() -> JSONResponse:
+    if SCHEDULE_EXECUTION_MODE != "external":
+        raise HTTPException(status_code=409, detail="on-demand laptop check-in requires external mode")
+    return JSONResponse(request_checkin())
 
 
 @app.get("/api/jobs/{job_id}")

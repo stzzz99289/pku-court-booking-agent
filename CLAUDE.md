@@ -126,8 +126,13 @@ latest `data/laptop_heartbeat.json`. Check-ins run at 00:00, 04:00, 08:00,
 before noon preparation. The server marks a heartbeat stale after five hours
 and shows a missing-run warning after 12:15 when no completed report arrived.
 It cannot directly query a sleeping or NATed laptop.
+The Schedule page's on-demand check-in button writes a three-minute request
+on the server. A separate lightweight Windows task polls for requests over
+outbound SSH once a minute and sends a separate check-in response only when asked.
+The six routine check-in times are unchanged; an unanswered request times out.
 
-`scripts/install_windows_schedule.ps1` installs both tasks for the signed-in
+`scripts/install_windows_schedule.ps1` installs the daily run, routine
+heartbeat, and on-demand poll tasks for the signed-in
 Windows user. Win+L preserves that session; sleep or sign-out prevents an
 interactive task from running. The tasks use the repo `.venv` and UTF-8 mode.
 `scripts/deploy_code.ps1` deploys only committed code by fast-forward Git,

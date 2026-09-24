@@ -439,10 +439,42 @@ const SCHEDULE_POLL_WAITING_MS = 5000;
 const SCHEDULE_COUNTDOWN_MS = 1000;
 
 let scheduleNextFireEpoch = null;
+let checkinSubmitting = false;
 
 function initScheduleTab() {
+  document.getElementById("schedule-checkin-button").addEventListener("click", requestLaptopCheckin);
   pollSchedule();
   setInterval(updateCountdown, SCHEDULE_COUNTDOWN_MS);
+}
+
+async function requestLaptopCheckin() {
+  const button = document.getElementById("schedule-checkin-button");
+  const feedback = document.getElementById("schedule-checkin-feedback");
+  checkinSubmitting = true;
+  button.disabled = true;
+  feedback.textContent = "Sending check-in request…";
+  try {
+    const response = await fetch("/api/schedule/check-in", {method: "POST"});
+    if (!response.ok) throw new Error(`Request failed (${response.status})`);
+    renderLaptopCheckin(await response.json());
+  } catch (err) {
+    feedback.textContent = `Could not request a check-in: ${err.message}`;
+  } finally {
+    checkinSubmitting = false;
+    if (!button.dataset.pending) button.disabled = false;
+  }
+}
+
+function renderLaptopCheckin(checkin) {
+  const button = document.getElementById("schedule-checkin-button");
+  const feedback = document.getElementById("schedule-checkin-feedback");
+  const state = checkin?.state || "none";
+  button.dataset.pending = state === "pending" ? "yes" : "";
+  button.disabled = checkinSubmitting || state === "pending";
+  if (state === "pending") feedback.textContent = "Waiting for the laptop’s response (up to 3 minutes)…";
+  else if (state === "responded") feedback.textContent = `Fresh response received ${new Date(checkin.responded_at * 1000).toLocaleString()}.`;
+  else if (state === "timed_out") feedback.textContent = "No response within 3 minutes. The laptop may be asleep or offline.";
+  else feedback.textContent = "Request a fresh response from this laptop.";
 }
 
 async function pollSchedule() {
@@ -464,13 +496,19 @@ function renderScheduleStatus(data) {
     ? "run" : data.state === "no report today" || data.state === "failed" ? "err" : "ok");
 
   const fmt = (epoch) => epoch ? new Date(epoch * 1000).toLocaleString() : "—";
-  document.getElementById("schedule-last-updated").textContent = fmt(data.last_updated_at);
+  document.getElementById("schedule-last-updated").textContent = fmt(
+    data.mode === "external" ? data.last_report_at : data.last_updated_at);
   const activity = document.getElementById("schedule-laptop-activity");
   activity.hidden = data.mode !== "external";
   if (data.mode === "external") {
     const lastSeen = data.laptop_last_seen_at;
-    const state = lastSeen ? (data.laptop_alive ? "Recently active" : "Check-in overdue") : "No check-in yet";
-    activity.className = "laptop-activity " + (lastSeen ? (data.laptop_alive ? "ok" : "err") : "unknown");
+    const checkin = data.checkin || {};
+    const checking = checkin.state === "pending";
+    const unanswered = checkin.state === "timed_out" && (!lastSeen || lastSeen < checkin.requested_at);
+    const state = checking ? "Checking now" : unanswered ? "No response" : lastSeen
+      ? (data.laptop_alive ? "Recently active" : "Check-in overdue") : "No check-in yet";
+    activity.className = "laptop-activity " + (checking ? "warn" : unanswered ? "err"
+      : lastSeen ? (data.laptop_alive ? "ok" : "err") : "unknown");
     document.getElementById("schedule-laptop-state").textContent = state;
     document.getElementById("schedule-host-last-seen").textContent = lastSeen ? fmt(lastSeen) : "Never checked in";
     const ageMinutes = lastSeen ? Math.max(0, Math.floor(((data.now || Date.now() / 1000) - lastSeen) / 60)) : null;
@@ -478,6 +516,7 @@ function renderScheduleStatus(data) {
       : `${Math.floor(ageMinutes / 60)} hr ${ageMinutes % 60} min ago`;
     document.getElementById("schedule-host-age").textContent = lastSeen
       ? `Last check-in ${age} · expected at least every 5 hours` : "Waiting for the laptop's first check-in.";
+    renderLaptopCheckin(checkin);
   }
   document.getElementById("schedule-source").textContent = data.mode === "external"
     ? `Booking runs on ${data.laptop_host || "the laptop"}; this page shows its latest uploaded report.`

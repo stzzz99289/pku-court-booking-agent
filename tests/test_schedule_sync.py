@@ -20,6 +20,7 @@ class ScheduleModeTests(unittest.TestCase):
         self.assertNotIn(("/run", "GET"), routes)
         self.assertNotIn(("/api/bookings/run", "POST"), routes)
         self.assertIn(("/schedule", "GET"), routes)
+        self.assertIn(("/api/schedule/check-in", "POST"), routes)
 
     def test_one_shot_run_accepts_only_the_preparation_window(self) -> None:
         cfg = SimpleNamespace(scheduled_time="120000", scheduled_prep_seconds=180)
@@ -116,6 +117,61 @@ class ScheduleTransportTests(unittest.TestCase):
             self.assertEqual(status["state"], "no report today")
             self.assertFalse(status["laptop_alive"])
             self.assertTrue(status["today_report_missing"])
+
+    def test_on_demand_checkin_requires_matching_fresh_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(schedule_sync, "DATA_DIR", root),
+                patch.object(schedule_sync, "CHECKIN_FILE", root / "request.json"),
+                patch.object(schedule_sync, "HEARTBEAT_FILE", root / "heartbeat.json"),
+                patch("web.backend.schedule_sync.time.time", return_value=1000),
+                patch.object(Scheduler, "_prune_profiles"),
+            ):
+                public = schedule_sync.request_checkin()
+                token = schedule_sync.pending_checkin_id()
+                self.assertEqual(public["state"], "pending")
+                self.assertNotIn(token, json.dumps(public))
+                self.assertEqual(token, schedule_sync.pending_checkin_id())
+                self.assertEqual(public, schedule_sync.request_checkin())
+
+                heartbeat = {"schema": 1, "source": "laptop", "state": "running", "sent_at": 1000}
+                schedule_sync.receive("heartbeat", json.dumps(heartbeat).encode())
+                self.assertEqual(schedule_sync.checkin_status()["state"], "pending")
+                response = {"schema": 1, "source": "laptop", "checkin_request_id": token, "sent_at": 1000, "host": "test-laptop"}
+                schedule_sync.receive("checkin", json.dumps(response).encode())
+                self.assertEqual(schedule_sync.checkin_status()["state"], "responded")
+                self.assertEqual(json.loads((root / "heartbeat.json").read_text())["state"], "running")
+                with patch.object(schedule_sync, "REPORT_FILE", root / "report.json"):
+                    status = schedule_sync.display_status()
+                self.assertTrue(status["laptop_alive"])
+                self.assertEqual(status["state"], "running")
+
+                schedule_sync.request_checkin()
+                self.assertNotEqual(token, schedule_sync.pending_checkin_id())
+                with self.assertRaises(ValueError):
+                    schedule_sync.receive("checkin", json.dumps(response).encode())
+                self.assertEqual(schedule_sync.checkin_status()["state"], "pending")
+
+            with (
+                patch.object(schedule_sync, "CHECKIN_FILE", root / "request.json"),
+                patch("web.backend.schedule_sync.time.time", return_value=1181),
+            ):
+                self.assertEqual(schedule_sync.checkin_status()["state"], "timed_out")
+
+    def test_probe_sends_response_only_when_requested(self) -> None:
+        token = "a" * 32
+        with (
+            patch("web.backend.schedule_sync.subprocess.run") as run,
+            patch.object(schedule_sync, "_ssh_send") as send,
+        ):
+            run.return_value = SimpleNamespace(returncode=0, stdout="\n")
+            self.assertFalse(schedule_sync.probe_checkin())
+            send.assert_not_called()
+            run.return_value.stdout = token + "\n"
+            self.assertTrue(schedule_sync.probe_checkin())
+            self.assertEqual(send.call_args.args[0], "checkin")
+            self.assertEqual(send.call_args.args[1]["checkin_request_id"], token)
 
 
 if __name__ == "__main__":
