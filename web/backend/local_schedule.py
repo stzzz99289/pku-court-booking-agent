@@ -113,16 +113,22 @@ async def run_once(*, cooldown_seconds: int = COOLDOWN_SECONDS) -> int:
 
 def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    handlers: list[logging.Handler] = [
+        logging.FileHandler(DATA_DIR / "local_schedule_task.log", mode="w", encoding="utf-8"),
+    ]
+    if sys.stdout is not None:
+        handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(DATA_DIR / "local_schedule_task.log", mode="w", encoding="utf-8"),
-        ],
+        handlers=handlers,
     )
-    return asyncio.run(run_once())
+    try:
+        return asyncio.run(run_once())
+    except Exception:
+        log.exception("Local scheduled task crashed before completing the run.")
+        return 1
 
 
 if __name__ == "__main__":

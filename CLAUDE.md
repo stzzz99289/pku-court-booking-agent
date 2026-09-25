@@ -138,7 +138,12 @@ check-in times are unchanged; an unanswered request times out.
 `scripts/install_windows_schedule.ps1` installs the daily run, routine
 heartbeat, and on-demand poll tasks for the signed-in
 Windows user. Win+L preserves that session; sleep or sign-out prevents an
-interactive task from running. The tasks use the repo `.venv` and UTF-8 mode.
+interactive task from running. All three tasks use the repo `.venv`'s
+windowless `pythonw.exe` and UTF-8 mode; the daily run writes its log to
+`data/local_schedule_task.log`. SSH and task-query subprocesses also suppress
+console windows. Windowless sync failures rotate through
+`data/schedule_sync_task.log`; Task Scheduler retains exit codes. Use
+`python.exe` manually when interactive output is needed.
 `scripts/deploy_code.ps1` deploys only committed code by fast-forward Git,
 restarts the webapp, and syncs private scheduled configs. The SSH destination
 can be overridden with `SCHEDULE_SYNC_SSH` and `SCHEDULE_SYNC_REMOTE_DIR`.

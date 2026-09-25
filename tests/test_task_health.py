@@ -18,7 +18,7 @@ class DailyTaskHealthTests(unittest.TestCase):
           <Triggers><CalendarTrigger><StartBoundary>2026-09-24T{time}+08:00</StartBoundary>
             <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
           </CalendarTrigger></Triggers>
-          <Actions><Exec><Command>{root}\\.venv\\Scripts\\python.exe</Command>
+          <Actions><Exec><Command>{root}\\.venv\\Scripts\\pythonw.exe</Command>
             <Arguments>{action}</Arguments><WorkingDirectory>{root}</WorkingDirectory>
           </Exec></Actions>
         </Task>'''

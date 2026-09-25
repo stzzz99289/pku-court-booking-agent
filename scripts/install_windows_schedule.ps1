@@ -3,6 +3,7 @@ param([switch]$Remove)
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $pythonExe = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$pythonWindowlessExe = Join-Path $projectRoot '.venv\Scripts\pythonw.exe'
 $runName = 'PKU Court Booking - Daily Run'
 $heartbeatName = 'PKU Court Booking - Heartbeat'
 $probeName = 'PKU Court Booking - On-Demand Check-In'
@@ -17,6 +18,9 @@ if ($Remove) {
 if (-not (Test-Path -LiteralPath $pythonExe)) {
     throw "Python virtual environment was not found at $pythonExe"
 }
+if (-not (Test-Path -LiteralPath $pythonWindowlessExe)) {
+    throw "Windowless Python was not found at $pythonWindowlessExe"
+}
 
 $account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
@@ -28,13 +32,13 @@ if ($LASTEXITCODE -ne 0 -or $fireTime -notmatch '^\d{2}:\d{2}:\d{2}$') {
 }
 $preflightTime = ([datetime]::ParseExact($fireTime, 'HH:mm:ss', $null).AddMinutes(-12)).ToString('HH:mm:ss')
 
-$runAction = New-ScheduledTaskAction -Execute $pythonExe `
+$runAction = New-ScheduledTaskAction -Execute $pythonWindowlessExe `
     -Argument '-X utf8 -m web.backend.local_schedule' -WorkingDirectory $projectRoot
 $runTrigger = New-ScheduledTaskTrigger -Daily -At $fireTime
 Register-ScheduledTask -TaskName $runName -Action $runAction -Trigger $runTrigger `
     -Principal $principal -Settings $settings -Force | Out-Null
 
-$heartbeatAction = New-ScheduledTaskAction -Execute $pythonExe `
+$heartbeatAction = New-ScheduledTaskAction -Execute $pythonWindowlessExe `
     -Argument '-X utf8 -m web.backend.schedule_sync heartbeat' -WorkingDirectory $projectRoot
 # The preflight check-in syncs config before browser preparation.
 $heartbeatTriggers = @('00:00:00', '04:00:00', '08:00:00', $preflightTime, '16:00:00', '20:00:00') |
@@ -44,7 +48,7 @@ Register-ScheduledTask -TaskName $heartbeatName -Action $heartbeatAction `
 
 # A one-minute SSH poll checks only for dashboard requests. It does not send a
 # heartbeat unless requested, so the six routine check-ins remain unchanged.
-$probeAction = New-ScheduledTaskAction -Execute $pythonExe `
+$probeAction = New-ScheduledTaskAction -Execute $pythonWindowlessExe `
     -Argument '-X utf8 -m web.backend.schedule_sync probe-checkin' -WorkingDirectory $projectRoot
 $probeTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes 1)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import platform
 import re
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import time
 from datetime import date, datetime, time as clock_time, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -283,6 +285,7 @@ def _ssh_send(kind: str, data: dict[str, Any]) -> None:
     completed = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", SSH_TARGET, remote],
         input=payload, capture_output=True, timeout=60, check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     if completed.returncode:
         raise RuntimeError(f"SSH {kind} upload failed (exit {completed.returncode})")
@@ -332,6 +335,7 @@ def probe_checkin() -> bool:
     completed = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", SSH_TARGET, remote],
         capture_output=True, timeout=25, check=False, text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     if completed.returncode:
         raise RuntimeError(f"SSH check-in probe failed (exit {completed.returncode})")
@@ -448,4 +452,19 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception:
+        if os.name == "nt" and sys.stderr is None:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(
+                DATA_DIR / "schedule_sync_task.log", maxBytes=1_000_000,
+                backupCount=2, encoding="utf-8",
+            )
+            logger = logging.getLogger("schedule_sync_task")
+            logger.addHandler(handler)
+            logger.setLevel(logging.ERROR)
+            logger.propagate = False
+            logger.exception("Windowless sync task failed")
+            handler.close()
+        raise

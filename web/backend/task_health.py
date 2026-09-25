@@ -27,6 +27,7 @@ def daily_booking_task_status() -> dict[str, str | None]:
         completed = subprocess.run(
             ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"],
             capture_output=True, text=True, timeout=10, check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except (OSError, subprocess.TimeoutExpired):
         return _result("unavailable", "Could not query Windows Task Scheduler.")
@@ -53,7 +54,7 @@ def daily_booking_task_status() -> dict[str, str | None]:
         command = action.findtext("t:Command", default="", namespaces=TASK_NS)
         arguments = action.findtext("t:Arguments", default="", namespaces=TASK_NS)
         working_directory = action.findtext("t:WorkingDirectory", default="", namespaces=TASK_NS)
-        expected_command = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+        expected_command = PROJECT_ROOT / ".venv" / "Scripts" / "pythonw.exe"
         if (os.path.normcase(os.path.normpath(command)) != os.path.normcase(os.path.normpath(str(expected_command)))
                 or arguments.strip() != "-X utf8 -m web.backend.local_schedule"
                 or os.path.normcase(os.path.normpath(working_directory)) != os.path.normcase(os.path.normpath(str(PROJECT_ROOT)))):
