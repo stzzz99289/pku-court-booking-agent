@@ -118,7 +118,7 @@ class OrderCacheService:
             order["can_cancel"] = order_is_cancellable(order)
             key = (str(order.get("user", "")), str(order.get("order_no", "")))
             job = get_job_manager().get(self.cancel_jobs.get(key, ""))
-            if job and job.status in {"pending", "running"}:
+            if job and job.status in {"pending", "running", "failed"}:
                 order["cancel_job_id"] = job.id
         active_job_id: str | None = None
         if self.current_job_id:
@@ -147,7 +147,8 @@ class OrderCacheService:
                 order["cancel_state"] = "canceled"
                 order["canceled_at"] = time.time()
                 order["order_status"] = "已取消"
-                order["pay_status"] = "退款中"
+                # Payment status depends on the site's free/direct vs refund
+                # route. Keep the last known value until the next live query.
                 self._write_cache(cache)
                 return
         raise RuntimeError("canceled order disappeared from the cache")
@@ -162,6 +163,7 @@ class OrderCacheService:
 
         async def _run(job: Job) -> dict[str, Any]:
             # Share the profile lock with refreshes and embedded booking runs.
+            job.set_stage("queued", "Waiting for the booking browser to be available")
             async with get_booking_lock():
                 if self.cancellable_order(user, order_no) is None:
                     raise ValueError("The order is no longer eligible for cancellation")
@@ -170,7 +172,9 @@ class OrderCacheService:
                 if account is None:
                     raise ValueError("The booking account is no longer configured")
                 job.append_log(f"[cancel] verifying {user} / {order_no} on the booking site")
-                message = await cancel_user_order(per_user_config(base, account), order_no)
+                message = await cancel_user_order(
+                    per_user_config(base, account), order_no, on_stage=job.set_stage,
+                )
                 self.mark_canceled(user, order_no)
                 job.append_log(f"[cancel] {message}")
                 return {"user": user, "order_no": order_no, "message": message}

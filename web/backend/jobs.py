@@ -58,9 +58,20 @@ class Job:
     error: str = ""
     logs: deque[str] = field(default_factory=lambda: deque(maxlen=JOB_LOG_CAPACITY))
     task: asyncio.Task | None = None
+    stage: str = ""
+    stage_message: str = ""
+    stage_history: list[dict[str, Any]] = field(default_factory=list)
 
     def append_log(self, line: str) -> None:
         self.logs.append(redact_sensitive_text(line))
+
+    def set_stage(self, stage: str, message: str) -> None:
+        """Record small, user-facing milestones for an in-flight job."""
+        safe_message = redact_sensitive_text(message)
+        self.stage = stage
+        self.stage_message = safe_message
+        self.stage_history.append({"stage": stage, "message": safe_message})
+        self.append_log(f"[stage] {safe_message}")
 
     def to_dict(self, log_offset: int = 0) -> dict[str, Any]:
         all_logs = list(self.logs)
@@ -72,6 +83,9 @@ class Job:
             "finished_at": self.finished_at,
             "error": redact_sensitive_text(self.error),
             "result": redact_sensitive_value(self.result),
+            "stage": self.stage,
+            "stage_message": redact_sensitive_text(self.stage_message),
+            "stage_history": redact_sensitive_value(self.stage_history),
             "logs": all_logs[log_offset:],
             "log_total": len(all_logs),
         }

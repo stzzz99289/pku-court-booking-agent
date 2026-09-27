@@ -63,7 +63,7 @@ class OrderCacheTests(unittest.TestCase):
             self.assertIsNone(service.cancellable_order("stz", "TARGET"))
             marked = service.load_cache()["orders"][0]
             self.assertEqual(marked["order_status"], "已取消")
-            self.assertEqual(marked["pay_status"], "退款中")
+            self.assertEqual(marked["pay_status"], "已支付")
             self.assertEqual(marked["cancel_state"], "canceled")
 
     def test_today_later_slot_is_cancellable_but_started_slot_is_not(self) -> None:
@@ -76,6 +76,17 @@ class OrderCacheTests(unittest.TestCase):
         self.assertFalse(order_is_cancellable({**order, "court_and_time": "1号 09:00-10:00"}, now))
         self.assertFalse(order_is_cancellable({**order, "court_and_time": "unknown"}, now))
         self.assertFalse(order_is_cancellable({**order, "order_status": "已取消"}, now))
+
+    def test_failed_cancel_job_remains_visible_after_page_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = OrderCacheService(Path(directory) / "orders_cache.json")
+            service._write_cache({"orders": [{"user": "stz", "order_no": "TARGET"}], "errors": []})
+            service.cancel_jobs[("stz", "TARGET")] = "failed-job"
+            failed = Job("failed-job", "orders:cancel", status="failed")
+            with patch("web.backend.order_cache.get_job_manager") as manager:
+                manager.return_value.get.return_value = failed
+                status = service.status()
+            self.assertEqual(status["orders"][0]["cancel_job_id"], "failed-job")
 
 
 class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
@@ -178,7 +189,8 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
             ], "errors": []})
             base = SimpleNamespace(users=[SimpleNamespace(name="stz")])
 
-            async def fake_cancel(_cfg, _order_no):
+            async def fake_cancel(_cfg, _order_no, *, on_stage):
+                on_stage("completed", "site confirmed")
                 await asyncio.sleep(0)
                 return "confirmed"
 
@@ -192,8 +204,10 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
                 second = service.start_cancel("stz", "TARGET")
                 self.assertIs(first, second)
                 await first.task
-            cancel.assert_awaited_once_with(None, "TARGET")
+            cancel.assert_awaited_once()
+            self.assertEqual(cancel.await_args.args, (None, "TARGET"))
             self.assertEqual(first.status, "succeeded")
+            self.assertEqual(first.stage, "completed")
             orders = service.load_cache()["orders"]
             self.assertEqual(orders[0]["cancel_state"], "canceled")
             self.assertEqual(orders[1]["order_status"], "正常")

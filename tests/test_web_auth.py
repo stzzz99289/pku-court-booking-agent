@@ -151,11 +151,14 @@ class PublicUserPayloadTests(unittest.TestCase):
         job.result = {"message": "account 15500001111", "nested": ["court-secret"]}
         job.error = "court-secret"
         job.append_log("login 15500001111 with court-secret")
+        job.set_stage("login", "checking 15500001111 with court-secret")
 
         rendered = repr(job.to_dict())
         self.assertNotIn("15500001111", rendered)
         self.assertNotIn("court-secret", rendered)
         self.assertIn("[REDACTED]", rendered)
+        self.assertEqual(job.to_dict()["stage"], "login")
+        self.assertEqual(len(job.to_dict()["stage_history"]), 1)
 
 
 if __name__ == "__main__":

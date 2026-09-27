@@ -191,9 +191,13 @@ computes eligibility so a phone's timezone cannot change the rule. An
 authenticated POST starts a per-order job under the shared
 booking/profile lock. The server rechecks the cached order and matching account,
 then uses the mobile order card's cancel control, confirms its popover, verifies
-the exact order ID on the site's refund page, and submits once. Never retry an
-ambiguous final submission automatically. The card shows progress and, on site
-confirmation, a persistent canceled state without a live all-user refresh;
+the exact order ID on the site's refund page and submits once when refund is
+required. Free orders can instead cancel directly after the popover; verify
+their exact card says `已取消` without waiting for a refund page. Never retry an
+ambiguous final submission automatically. The server job records key stages,
+which the order card polls and restores after a page refresh while the server
+process remains alive. On site confirmation, the cache stores a persistent
+canceled state without a live all-user refresh;
 canceled orders and their now-invalid proofs are removed on the next refresh.
 
 **Session verification.** The Orders page shows the booking host's latest

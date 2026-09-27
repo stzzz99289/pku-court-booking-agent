@@ -56,7 +56,10 @@ async function loadOrderCache() {
     for (const order of lastFetchedOrders) {
       if (order.cancel_job_id) {
         const key = orderKey(order.user, order.order_no);
-        cancelStates.set(key, {state: "pending", jobId: order.cancel_job_id});
+        const previous = cancelStates.get(key);
+        if (previous?.jobId !== order.cancel_job_id) {
+          cancelStates.set(key, {state: "pending", jobId: order.cancel_job_id});
+        }
         pollCancelJob(order.cancel_job_id, key);
       }
     }
@@ -164,7 +167,7 @@ function renderOrderCards(orders) {
     return;
   }
   const cards = filtered.map((o) => `
-    <article class="order-card">
+    <article class="order-card" data-user="${escapeHtml(o.user ?? "")}" data-order-no="${escapeHtml(o.order_no ?? "")}">
       <div class="order-card-heading">
         <span class="order-field-label">Order ID</span>
         <strong class="order-number">${escapeHtml(o.order_no ?? "—")}</strong>
@@ -179,7 +182,7 @@ function renderOrderCards(orders) {
           <strong>${escapeHtml(o.court_and_time ?? "—")}</strong>
         </div>
       </div>
-      ${renderCancelControl(o)}
+      <div class="order-cancel-slot">${renderCancelControl(o)}</div>
       ${renderOrderProof(o)}
       <details class="order-details">
         <summary>Other information</summary>
@@ -209,14 +212,34 @@ function renderCancelControl(order) {
     return '<div class="order-cancel-result success" role="status">Canceled on the booking site. Any refund follows the site’s policy; this card will disappear on the next order refresh.</div>';
   }
   if (state?.state === "pending") {
-    return '<div class="order-cancel-progress" role="status"><span>Canceling this order on the booking site…</span><div class="order-cancel-track"><div></div></div></div>';
+    const message = state.stageMessage || "Starting cancellation on the server…";
+    return `<div class="order-cancel-progress" role="status"><span>${escapeHtml(message)}</span>
+      <div class="order-cancel-track"><div></div></div>${renderCancelStages(state.stageHistory)}</div>`;
   }
   if (state?.state === "failed") {
-    return `<div class="order-cancel-result failure" role="alert">${escapeHtml(state.message)} Check the booking site before trying again.</div>`;
+    return `<div class="order-cancel-result failure" role="alert">${escapeHtml(state.message)} Check the booking site before trying again.
+      ${renderCancelStages(state.stageHistory)}</div>`;
   }
   if (!canCancelOrder(order)) return "";
   return `<div class="order-cancel-actions"><button type="button" class="order-cancel-btn"
       data-user="${escapeHtml(order.user)}" data-order-no="${escapeHtml(order.order_no)}">Cancel order</button></div>`;
+}
+
+function renderCancelStages(stages) {
+  if (!Array.isArray(stages) || !stages.length) return "";
+  return `<ol class="order-cancel-stages">${stages.map((item) =>
+    `<li>${escapeHtml(item.message || "")}</li>`).join("")}</ol>`;
+}
+
+function updateCancelDisplay(key) {
+  const order = lastFetchedOrders.find((item) => orderKey(item.user, item.order_no) === key);
+  if (!order) return;
+  for (const card of document.querySelectorAll(".order-card")) {
+    if (orderKey(card.dataset.user, card.dataset.orderNo) === key) {
+      card.querySelector(".order-cancel-slot").innerHTML = renderCancelControl(order);
+      break;
+    }
+  }
 }
 
 async function cancelOrder(button) {
@@ -227,7 +250,7 @@ async function cancelOrder(button) {
   if (!window.confirm(`Cancel order ${orderNo} for ${user}?\n${order.use_date} · ${order.court_and_time}\n\nThis submits a cancellation/refund request on the booking site and cannot be undone.`)) return;
   const key = orderKey(user, orderNo);
   cancelStates.set(key, {state: "pending"});
-  renderOrderCards(lastFetchedOrders);
+  updateCancelDisplay(key);
   try {
     const response = await fetch("/api/orders/cancel", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -239,7 +262,7 @@ async function cancelOrder(button) {
     pollCancelJob(data.job_id, key);
   } catch (err) {
     cancelStates.set(key, {state: "failed", message: err.message});
-    renderOrderCards(lastFetchedOrders);
+    updateCancelDisplay(key);
   }
 }
 
@@ -257,15 +280,20 @@ async function pollCancelJob(jobId, key) {
         break;
       }
       if (job.status === "failed") {
-        cancelStates.set(key, {state: "failed", message: job.error || "Cancellation failed."});
-        renderOrderCards(lastFetchedOrders);
+        cancelStates.set(key, {state: "failed", jobId,
+          message: job.error || "Cancellation failed.", stageHistory: job.stage_history || []});
+        updateCancelDisplay(key);
         break;
       }
+      cancelStates.set(key, {state: "pending", jobId,
+        stageMessage: job.stage_message || "Cancellation running on the server…",
+        stageHistory: job.stage_history || []});
+      updateCancelDisplay(key);
       await sleep(POLL_INTERVAL_MS);
     }
   } catch (err) {
     cancelStates.set(key, {state: "failed", message: err.message});
-    renderOrderCards(lastFetchedOrders);
+    updateCancelDisplay(key);
   } finally {
     cancelPollingJobs.delete(jobId);
   }

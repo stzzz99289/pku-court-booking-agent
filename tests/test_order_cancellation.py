@@ -13,7 +13,7 @@ ORDER_NO = "D260927000140"
 
 
 class OrderCancellationTests(unittest.IsolatedAsyncioTestCase):
-    def _page(self, *, exact_card: bool = True):
+    def _page(self, *, exact_card: bool = True, direct: bool = False):
         page = MagicMock()
         page.url = "https://epe.pku.edu.cn/venue/mobileOrders"
         page.set_viewport_size = AsyncMock()
@@ -29,11 +29,13 @@ class OrderCancellationTests(unittest.IsolatedAsyncioTestCase):
 
         order_label = MagicMock()
         order_label.count = AsyncMock(return_value=1 if exact_card else 0)
+        order_label.wait_for = AsyncMock()
         cancel = MagicMock()
         cancel.count = AsyncMock(return_value=1)
         cancel.is_visible = AsyncMock(return_value=True)
         cancel.click = AsyncMock()
         card = MagicMock()
+        card.count = AsyncMock(return_value=1)
         card.get_by_text.side_effect = lambda text, **_kwargs: (
             order_label if text == ORDER_NO else cancel
         )
@@ -45,7 +47,12 @@ class OrderCancellationTests(unittest.IsolatedAsyncioTestCase):
         confirm.count = AsyncMock(return_value=1)
 
         async def confirm_click():
-            page.url = f"https://epe.pku.edu.cn/venue/orders-return-charge/{ORDER_NO}"
+            if direct:
+                card.inner_text = AsyncMock(return_value=(
+                    f"订单号\n{ORDER_NO}\n订单状态\n已取消\n支付状态\n已支付"
+                ))
+            else:
+                page.url = f"https://epe.pku.edu.cn/venue/orders-return-charge/{ORDER_NO}"
 
         confirm.click = AsyncMock(side_effect=confirm_click)
         popover.get_by_text.return_value = confirm
@@ -58,6 +65,7 @@ class OrderCancellationTests(unittest.IsolatedAsyncioTestCase):
         submit = MagicMock()
         submit.count = AsyncMock(return_value=1)
         submit.is_visible = AsyncMock(return_value=True)
+        submit.wait_for = AsyncMock()
         submit.click = AsyncMock()
         page.get_by_role.return_value = submit
         return page, card, submit
@@ -101,6 +109,32 @@ class OrderCancellationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OrderCancellationError):
                 await cancel_user_order(cfg, ORDER_NO)
         submit.click.assert_not_awaited()
+
+    async def test_free_order_cancels_directly_without_refund_page(self) -> None:
+        page, card, submit = self._page(direct=True)
+        context = SimpleNamespace(pages=[page])
+        cfg = SimpleNamespace(base_url="https://epe.pku.edu.cn/venue/home")
+        stages = []
+        with (
+            patch("web.backend.order_cancellation.launch_persistent_context",
+                  new_callable=AsyncMock, return_value=(context, Path("unused"))),
+            patch("web.backend.order_cancellation.dispose_context", new_callable=AsyncMock),
+            patch("web.backend.order_cancellation._goto_with_retry", new_callable=AsyncMock),
+            patch("web.backend.order_cancellation.ensure_logged_in", new_callable=AsyncMock),
+            patch("web.backend.order_cancellation._orders_session_rejected",
+                  new_callable=AsyncMock, return_value=False),
+            patch("web.backend.order_cancellation._find_mobile_card",
+                  new_callable=AsyncMock, return_value=card),
+            patch("web.backend.order_cancellation._default_login_solver", return_value=object()),
+        ):
+            message = await cancel_user_order(
+                cfg, ORDER_NO, on_stage=lambda key, _message: stages.append(key),
+            )
+        self.assertIn("confirmed cancellation", message)
+        submit.click.assert_not_awaited()
+        self.assertIn("order_found", stages)
+        self.assertIn("confirming", stages)
+        self.assertEqual(stages[-1], "completed")
 
 
 if __name__ == "__main__":
