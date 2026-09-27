@@ -147,6 +147,8 @@ class OrderCacheService:
                 order["cancel_state"] = "canceled"
                 order["canceled_at"] = time.time()
                 order["order_status"] = "已取消"
+                order["can_cancel"] = False
+                order["proof_url"] = None
                 # Payment status depends on the site's free/direct vs refund
                 # route. Keep the last known value until the next live query.
                 self._write_cache(cache)

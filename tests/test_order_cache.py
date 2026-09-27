@@ -65,6 +65,8 @@ class OrderCacheTests(unittest.TestCase):
             self.assertEqual(marked["order_status"], "已取消")
             self.assertEqual(marked["pay_status"], "已支付")
             self.assertEqual(marked["cancel_state"], "canceled")
+            self.assertFalse(marked["can_cancel"])
+            self.assertIsNone(marked["proof_url"])
 
     def test_today_later_slot_is_cancellable_but_started_slot_is_not(self) -> None:
         now = datetime(2026, 9, 27, 10, 30, tzinfo=PKU_TIMEZONE)
