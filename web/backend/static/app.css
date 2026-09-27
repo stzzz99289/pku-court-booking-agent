@@ -315,6 +315,32 @@ table.data tbody tr:hover td { background: rgba(244, 247, 252, 0.65); }
 }
 .date-badge.today { background: var(--ok-soft); color: var(--ok); }
 .date-badge.tomorrow { background: #f0eaff; color: #7048c6; }
+.order-cancel-actions { display: flex; justify-content: flex-end; margin: 0 0 0.75rem; }
+.order-cancel-btn {
+  width: auto;
+  min-height: 36px;
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid #e8b7bd;
+  background: #fff;
+  color: #ac3344;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+.order-cancel-btn:hover { border-color: #cc7884; background: #fff6f7; }
+.order-cancel-progress, .order-cancel-result {
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.order-cancel-progress { border: 1px solid #d6e2fa; background: #f1f6ff; color: #31559f; }
+.order-cancel-track { height: 5px; margin-top: 0.55rem; overflow: hidden; border-radius: 10px; background: #dce8fa; }
+.order-cancel-track > div { width: 35%; height: 100%; border-radius: inherit; background: #4e77d4; animation: order-cancel-moving 1.4s ease-in-out infinite alternate; }
+@keyframes order-cancel-moving { from { transform: translateX(0); } to { transform: translateX(185%); } }
+.order-cancel-result.success { border: 1px solid #bde8d2; background: #f0fbf5; color: #196b43; }
+.order-cancel-result.failure { border: 1px solid #f2c7cc; background: #fff3f4; color: #9b2638; }
 .order-details {
   margin: 0;
   padding: 0.7rem 0 0;

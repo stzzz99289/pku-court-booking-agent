@@ -325,6 +325,23 @@ async def api_orders_cache() -> JSONResponse:
     return JSONResponse(get_order_cache().status())
 
 
+@app.post("/api/orders/cancel")
+async def api_order_cancel(payload: dict[str, Any]) -> JSONResponse:
+    """Start one exact-order cancellation after checking the visible cache."""
+    user = payload.get("user")
+    order_no = payload.get("order_no")
+    if (
+        not isinstance(user, str) or not isinstance(order_no, str)
+        or not 1 <= len(user) <= 80 or not 1 <= len(order_no) <= 80
+    ):
+        raise HTTPException(status_code=400, detail="valid user and order_no are required")
+    try:
+        job = get_order_cache().start_cancel(user, order_no)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse({"job_id": job.id})
+
+
 @app.get("/api/orders/proof")
 async def api_order_proof(user: str, order_no: str) -> FileResponse:
     """Serve a cached proof only while its order remains in the visible cache."""
@@ -332,6 +349,7 @@ async def api_order_proof(user: str, order_no: str) -> FileResponse:
     visible = any(
         str(order.get("user", "")) == user
         and str(order.get("order_no", "")) == order_no
+        and order.get("cancel_state") != "canceled"
         for order in service.load_cache().get("orders", [])
     )
     if not visible:

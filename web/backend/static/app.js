@@ -10,6 +10,8 @@ document.addEventListener("click", (e) => {
   if (queryBtn) queryAllOrders(queryBtn);
   const proofBtn = e.target.closest(".order-proof-preview");
   if (proofBtn) showProofDialog(proofBtn);
+  const cancelBtn = e.target.closest(".order-cancel-btn");
+  if (cancelBtn) cancelOrder(cancelBtn);
   const closeBtn = e.target.closest(".proof-dialog-close");
   if (closeBtn) closeProofDialog();
 });
@@ -19,6 +21,10 @@ document.addEventListener("click", (e) => {
 // filter is instant and never re-hits the site.
 let lastFetchedOrders = [];
 let ordersPollingJobId = null;
+const cancelStates = new Map();
+const cancelPollingJobs = new Set();
+
+function orderKey(user, orderNo) { return `${user}\u0000${orderNo}`; }
 
 document.addEventListener("change", (e) => {
   const sel = e.target.closest("#venue-filter");
@@ -47,6 +53,13 @@ async function loadOrderCache() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const cache = await response.json();
     lastFetchedOrders = cache.orders || [];
+    for (const order of lastFetchedOrders) {
+      if (order.cancel_job_id) {
+        const key = orderKey(order.user, order.order_no);
+        cancelStates.set(key, {state: "pending", jobId: order.cancel_job_id});
+        pollCancelJob(order.cancel_job_id, key);
+      }
+    }
     renderOrderCards(lastFetchedOrders);
     renderOrderCacheTime(cache.updated_at, cache.errors || []);
     if (cache.active_job_id && cache.active_job_id !== ordersPollingJobId) {
@@ -166,6 +179,7 @@ function renderOrderCards(orders) {
           <strong>${escapeHtml(o.court_and_time ?? "—")}</strong>
         </div>
       </div>
+      ${renderCancelControl(o)}
       ${renderOrderProof(o)}
       <details class="order-details">
         <summary>Other information</summary>
@@ -182,7 +196,86 @@ function renderOrderCards(orders) {
   target.innerHTML = `<div class="order-list">${cards}</div>`;
 }
 
+function canCancelOrder(order) {
+  const useDate = String(order.use_date ?? "").replaceAll(/\D/g, "").slice(0, 8);
+  return useDate.length === 8 && useDate > localDateKey(new Date())
+    && order.pay_status === "已支付" && order.order_status === "正常"
+    && order.cancel_state !== "canceled";
+}
+
+function renderCancelControl(order) {
+  const key = orderKey(order.user, order.order_no);
+  const state = cancelStates.get(key);
+  if (order.cancel_state === "canceled") {
+    return '<div class="order-cancel-result success" role="status">Canceled on the booking site. Any refund follows the site’s policy; this card will disappear on the next order refresh.</div>';
+  }
+  if (state?.state === "pending") {
+    return '<div class="order-cancel-progress" role="status"><span>Canceling this order on the booking site…</span><div class="order-cancel-track"><div></div></div></div>';
+  }
+  if (state?.state === "failed") {
+    return `<div class="order-cancel-result failure" role="alert">${escapeHtml(state.message)} Check the booking site before trying again.</div>`;
+  }
+  if (!canCancelOrder(order)) return "";
+  return `<div class="order-cancel-actions"><button type="button" class="order-cancel-btn"
+      data-user="${escapeHtml(order.user)}" data-order-no="${escapeHtml(order.order_no)}">Cancel order</button></div>`;
+}
+
+async function cancelOrder(button) {
+  const user = button.dataset.user || "";
+  const orderNo = button.dataset.orderNo || "";
+  const order = lastFetchedOrders.find((item) => item.user === user && item.order_no === orderNo);
+  if (!order || !canCancelOrder(order)) return;
+  if (!window.confirm(`Cancel order ${orderNo} for ${user}?\n${order.use_date} · ${order.court_and_time}\n\nThis submits a cancellation/refund request on the booking site and cannot be undone.`)) return;
+  const key = orderKey(user, orderNo);
+  cancelStates.set(key, {state: "pending"});
+  renderOrderCards(lastFetchedOrders);
+  try {
+    const response = await fetch("/api/orders/cancel", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({user, order_no: orderNo}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+    cancelStates.set(key, {state: "pending", jobId: data.job_id});
+    pollCancelJob(data.job_id, key);
+  } catch (err) {
+    cancelStates.set(key, {state: "failed", message: err.message});
+    renderOrderCards(lastFetchedOrders);
+  }
+}
+
+async function pollCancelJob(jobId, key) {
+  if (cancelPollingJobs.has(jobId)) return;
+  cancelPollingJobs.add(jobId);
+  try {
+    while (true) {
+      const response = await fetch(`/api/jobs/${jobId}`);
+      if (!response.ok) throw new Error(`Could not check cancellation (${response.status})`);
+      const job = await response.json();
+      if (job.status === "succeeded") {
+        cancelStates.delete(key);
+        await loadOrderCache(); // Local saved cache only; does not query the booking site.
+        break;
+      }
+      if (job.status === "failed") {
+        cancelStates.set(key, {state: "failed", message: job.error || "Cancellation failed."});
+        renderOrderCards(lastFetchedOrders);
+        break;
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+  } catch (err) {
+    cancelStates.set(key, {state: "failed", message: err.message});
+    renderOrderCards(lastFetchedOrders);
+  } finally {
+    cancelPollingJobs.delete(jobId);
+  }
+}
+
 function renderOrderProof(order) {
+  if (order.cancel_state === "canceled") {
+    return '<p class="order-proof-missing">The former proof is no longer valid after cancellation.</p>';
+  }
   if (!order.proof_url) {
     return '<p class="order-proof-missing">Proof screenshot unavailable</p>';
   }

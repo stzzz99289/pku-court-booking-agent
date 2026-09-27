@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,6 +41,26 @@ class OrderCacheTests(unittest.TestCase):
             path.write_text(json.dumps({"orders": "not-a-list"}), encoding="utf-8")
             self.assertEqual(service.load_cache()["orders"], [])
 
+    def test_only_active_paid_future_order_is_cancellable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = OrderCacheService(Path(directory) / "orders_cache.json")
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            service._write_cache({"orders": [
+                {"user": "stz", "order_no": "TARGET", "use_date": tomorrow,
+                 "pay_status": "已支付", "order_status": "正常"},
+                {"user": "zy", "order_no": "OTHER", "use_date": tomorrow,
+                 "pay_status": "已支付", "order_status": "已取消"},
+            ], "errors": []})
+            self.assertIsNotNone(service.cancellable_order("stz", "TARGET"))
+            self.assertIsNone(service.cancellable_order("zy", "OTHER"))
+            self.assertIsNone(service.cancellable_order("stz", "OTHER"))
+            service.mark_canceled("stz", "TARGET")
+            self.assertIsNone(service.cancellable_order("stz", "TARGET"))
+            marked = service.load_cache()["orders"][0]
+            self.assertEqual(marked["order_status"], "已取消")
+            self.assertEqual(marked["pay_status"], "退款中")
+            self.assertEqual(marked["cancel_state"], "canceled")
+
 
 class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_user_keeps_previous_cached_orders(self) -> None:
@@ -64,7 +84,7 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
                 return [Order(
                     user="stz", order_no="NEW-STZ", order_type="online",
                     venue="court", use_date="2026-09-03", court_and_time="20:00",
-                    pay_status="paid", order_status="confirmed", amount="40",
+                    pay_status="已支付", order_status="正常", amount="40",
                     created_at="2026-09-01",
                 )]
 
@@ -108,6 +128,57 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(result["updated_at"], 100.0)
             self.assertIn("keeping cached results", result["errors"][0])
+
+    async def test_canceled_order_disappears_even_if_live_query_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = OrderCacheService(Path(directory) / "orders_cache.json")
+            service._write_cache({
+                "updated_at": 100.0, "attempted_at": 100.0,
+                "orders": [{"user": "stz", "order_no": "CANCELED",
+                            "use_date": "2026-09-28", "cancel_state": "canceled"}],
+                "errors": [],
+            })
+            base = SimpleNamespace(users=[SimpleNamespace(name="stz")])
+            with (
+                patch("web.backend.order_cache.load_set", return_value=base),
+                patch("web.backend.order_cache.per_user_config", return_value=None),
+                patch("web.backend.order_cache.fetch_user_orders", return_value=[]),
+                patch("web.backend.order_cache.get_booking_lock", return_value=asyncio.Lock()),
+            ):
+                result = await service._fetch_and_store(Job("test", "orders:all"), 10)
+            self.assertEqual(result["orders"], [])
+
+    async def test_cancel_job_is_deduplicated_and_marks_only_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = OrderCacheService(Path(directory) / "orders_cache.json")
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            service._write_cache({"orders": [
+                {"user": "stz", "order_no": "TARGET", "use_date": tomorrow,
+                 "pay_status": "已支付", "order_status": "正常"},
+                {"user": "zy", "order_no": "OTHER", "use_date": tomorrow,
+                 "pay_status": "已支付", "order_status": "正常"},
+            ], "errors": []})
+            base = SimpleNamespace(users=[SimpleNamespace(name="stz")])
+
+            async def fake_cancel(_cfg, _order_no):
+                await asyncio.sleep(0)
+                return "confirmed"
+
+            with (
+                patch("web.backend.order_cache.load_set", return_value=base),
+                patch("web.backend.order_cache.per_user_config", return_value=None),
+                patch("web.backend.order_cache.cancel_user_order", side_effect=fake_cancel) as cancel,
+                patch("web.backend.order_cache.get_booking_lock", return_value=asyncio.Lock()),
+            ):
+                first = service.start_cancel("stz", "TARGET")
+                second = service.start_cancel("stz", "TARGET")
+                self.assertIs(first, second)
+                await first.task
+            cancel.assert_awaited_once_with(None, "TARGET")
+            self.assertEqual(first.status, "succeeded")
+            orders = service.load_cache()["orders"]
+            self.assertEqual(orders[0]["cancel_state"], "canceled")
+            self.assertEqual(orders[1]["order_status"], "正常")
 
 
 if __name__ == "__main__":

@@ -68,6 +68,20 @@ class OrderProofStoreTests(unittest.TestCase):
             self.assertTrue(paths["TODAY"].exists())
             self.assertTrue(paths["FUTURE"].exists())
 
+    def test_canceled_proof_is_hidden_then_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OrderProofStore(Path(directory))
+            order = _order("CANCELED", "2026-09-08")
+            path = store.target_path(order.user, order.order_no)
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"png")
+            store.record(order, path)
+            canceled = {**order.to_dict(), "cancel_state": "canceled"}
+            self.assertIsNone(store.attach_urls([canceled])[0]["proof_url"])
+            store.remove(order.user, order.order_no)
+            self.assertIsNone(store.cached_path(order.user, order.order_no))
+            self.assertFalse(path.exists())
+
 
 class OrderProofCaptureTests(unittest.IsolatedAsyncioTestCase):
     def test_linux_capture_rejects_missing_chinese_fonts(self) -> None:

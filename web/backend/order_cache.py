@@ -5,15 +5,17 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from src.booking.orders import Order, fetch_user_orders
 from web.backend.config_loader import load_set, per_user_config
 from web.backend.jobs import Job, get_booking_lock, get_job_manager
+from web.backend.order_cancellation import cancel_user_order
 from web.backend.order_proofs import (
     OrderProofStore,
+    _date_value,
     capture_missing_order_proofs,
 )
 
@@ -49,6 +51,7 @@ class OrderCacheService:
         self.task: asyncio.Task | None = None
         self.next_refresh: float | None = None
         self.current_job_id: str | None = None
+        self.cancel_jobs: dict[tuple[str, str], str] = {}
         self._stopped = False
 
     @staticmethod
@@ -88,6 +91,11 @@ class OrderCacheService:
     def status(self) -> dict[str, Any]:
         data = self.load_cache()
         data["orders"] = self.proofs.attach_urls(data["orders"])
+        for order in data["orders"]:
+            key = (str(order.get("user", "")), str(order.get("order_no", "")))
+            job = get_job_manager().get(self.cancel_jobs.get(key, ""))
+            if job and job.status in {"pending", "running"}:
+                order["cancel_job_id"] = job.id
         active_job_id: str | None = None
         if self.current_job_id:
             job = get_job_manager().get(self.current_job_id)
@@ -98,6 +106,60 @@ class OrderCacheService:
             "next_refresh": self.next_refresh,
             "active_job_id": active_job_id,
         }
+
+    def cancellable_order(self, user: str, order_no: str) -> dict[str, Any] | None:
+        """Allow only visible, paid, normal, future orders to be canceled."""
+        for order in self.load_cache()["orders"]:
+            if (order.get("user"), order.get("order_no")) != (user, order_no):
+                continue
+            use_date = _date_value(str(order.get("use_date", "")))
+            if (
+                order.get("pay_status") == "已支付"
+                and order.get("order_status") == "正常"
+                and order.get("cancel_state") != "canceled"
+                and use_date is not None and use_date > date.today()
+            ):
+                return order
+        return None
+
+    def mark_canceled(self, user: str, order_no: str) -> None:
+        cache = self.load_cache()
+        for order in cache["orders"]:
+            if (order.get("user"), order.get("order_no")) == (user, order_no):
+                order["cancel_state"] = "canceled"
+                order["canceled_at"] = time.time()
+                order["order_status"] = "已取消"
+                order["pay_status"] = "退款中"
+                self._write_cache(cache)
+                return
+        raise RuntimeError("canceled order disappeared from the cache")
+
+    def start_cancel(self, user: str, order_no: str) -> Job:
+        key = (user, order_no)
+        previous = get_job_manager().get(self.cancel_jobs.get(key, ""))
+        if previous and previous.status in {"pending", "running"}:
+            return previous
+        if self.cancellable_order(user, order_no) is None:
+            raise ValueError("Only active, paid, future cached orders can be canceled")
+
+        async def _run(job: Job) -> dict[str, Any]:
+            # Share the profile lock with refreshes and embedded booking runs.
+            async with get_booking_lock():
+                if self.cancellable_order(user, order_no) is None:
+                    raise ValueError("The order is no longer eligible for cancellation")
+                base = load_set("scheduled")
+                account = next((item for item in base.users if item.name == user), None)
+                if account is None:
+                    raise ValueError("The booking account is no longer configured")
+                job.append_log(f"[cancel] verifying {user} / {order_no} on the booking site")
+                message = await cancel_user_order(per_user_config(base, account), order_no)
+                self.mark_canceled(user, order_no)
+                job.append_log(f"[cancel] {message}")
+                return {"user": user, "order_no": order_no, "message": message}
+
+        job = get_job_manager().start("orders:cancel", _run, capture_logger_names=())
+        self.cancel_jobs[key] = job.id
+        return job
 
     async def start(self) -> None:
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +202,11 @@ class OrderCacheService:
         if pruned:
             job.append_log(f"[orders] removed {pruned} expired proof screenshot(s)")
         previous_by_user: dict[str, list[dict[str, Any]]] = {}
+        canceled_previous: list[dict[str, Any]] = []
         for order in previous["orders"]:
+            if order.get("cancel_state") == "canceled":
+                canceled_previous.append(order)
+                continue
             previous_by_user.setdefault(str(order.get("user", "")), []).append(order)
 
         combined: list[dict[str, Any]] = []
@@ -180,7 +246,10 @@ class OrderCacheService:
                         job.append_log(f"[orders] {message}")
                         user_orders = previous_by_user[user.name]
                     else:
-                        user_orders = [order.to_dict() for order in orders]
+                        user_orders = [
+                            order.to_dict() for order in orders
+                            if order.pay_status == "已支付" and order.order_status == "正常"
+                        ]
                         successful_users += 1
                 except Exception as exc:
                     message = f"{user.name}: {type(exc).__name__}: {exc}"
@@ -211,6 +280,8 @@ class OrderCacheService:
         }
         result["orders"] = self.proofs.attach_urls(result["orders"])
         self._write_cache(result)
+        for order in canceled_previous:
+            self.proofs.remove(str(order.get("user", "")), str(order.get("order_no", "")))
         log.info(
             "order cache: refresh finished; %d/%d user(s) succeeded, %d order(s).",
             successful_users, len(base.users), len(combined),

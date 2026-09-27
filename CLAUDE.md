@@ -160,8 +160,15 @@ metadata, visible widget state, and redacted endpoint metadata under
 `debugging/captcha_failures/YYYYMMDD/`. Solver pixels are mapped to the rendered
 image box instead of assuming device pixels equal CSS pixels, and only one fresh
 challenge is attempted after an invalid-coordinate response to avoid PKU's rate
-limit. Keep the Playwright version pinned in `requirements.txt` so Windows and
-Linux use the same Chromium generation. Scheduled profiling files retain a
+limit. Invalid-CAPTCHA diagnostics also record sanitized application response
+codes/messages and timings for CAPTCHA creation/check and order submission.
+One-run-only keyed correlation markers can show whether CAPTCHA values and
+session credentials match across those calls; raw tokens, passwords, and
+request bodies are never saved. The site's
+"每天只能预约2次" rejection ends that worker immediately with a distinct daily-limit
+result, without another priority-list refresh. Keep the Playwright version
+pinned in `requirements.txt` so Windows and Linux use the same Chromium
+generation. Scheduled profiling files retain a
 seven-day window. Crash evidence and CAPTCHA diagnostics are never pruned
 automatically.
 
@@ -177,6 +184,15 @@ the next refresh. A transient empty table is polled and re-opened before being
 accepted; if an established user still returns zero rows, the webapp preserves
 that user's previous cache instead of erasing it. Images are exposed only
 through the authenticated webapp.
+
+**Order cancellation.** The Orders page offers Cancel only for active, paid,
+future orders. An authenticated POST starts a per-order job under the shared
+booking/profile lock. The server rechecks the cached order and matching account,
+then uses the mobile order card's cancel control, confirms its popover, verifies
+the exact order ID on the site's refund page, and submits once. Never retry an
+ambiguous final submission automatically. The card shows progress and, on site
+confirmation, a persistent canceled state without a live all-user refresh;
+canceled orders and their now-invalid proofs are removed on the next refresh.
 
 **Session verification.** The Orders page shows the booking host's latest
 verification time for each account. In external mode this comes from the

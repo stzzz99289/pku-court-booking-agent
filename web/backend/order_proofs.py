@@ -134,6 +134,22 @@ class OrderProofStore:
         }
         self._write_index(index)
 
+    def remove(self, user: str, order_no: str) -> None:
+        """Discard a canceled order's proof at the next cache refresh."""
+        index = self._load_index()
+        entry = index.pop(self._key(user, order_no), None)
+        if entry is None:
+            return
+        root = self.root.resolve()
+        path = (root / entry["file"]).resolve()
+        if root in path.parents and path.is_file():
+            try:
+                path.unlink()
+            except OSError as exc:
+                log.warning("order proofs: could not remove %s: %s", path, exc)
+                return
+        self._write_index(index)
+
     def proof_url(self, user: str, order_no: str) -> str | None:
         if self.cached_path(user, order_no) is None:
             return None
@@ -146,8 +162,10 @@ class OrderProofStore:
         decorated: list[dict[str, Any]] = []
         for order in orders:
             item = dict(order)
-            item["proof_url"] = self.proof_url(
-                str(item.get("user", "")), str(item.get("order_no", "")),
+            item["proof_url"] = (
+                None if item.get("cancel_state") == "canceled" else self.proof_url(
+                    str(item.get("user", "")), str(item.get("order_no", "")),
+                )
             )
             decorated.append(item)
         return decorated
