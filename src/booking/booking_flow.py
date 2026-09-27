@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
+import secrets
 import struct
 from datetime import datetime
 from pathlib import Path
@@ -1015,7 +1018,129 @@ async def _refresh_captcha(page: Page) -> bool:
         return False
 
 
-async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> BookingResult | None:
+_CAPTCHA_DIAGNOSTIC_PATHS = (
+    "/venue-server/api/captcha/get",
+    "/venue-server/api/captcha/check",
+    "/venue-server/api/reservation/order/submit",
+)
+_CAPTCHA_DIAGNOSTIC_FIELDS = ("code", "status", "success", "msg", "message", "error", "errorCode")
+_CAPTCHA_TOKEN_FIELDS = ("captchaToken", "captchaVerification")
+
+
+def start_captcha_network_capture(page: Page) -> tuple[list[tuple[str, Any]], Any]:
+    """Capture relevant response handles before opening the booking CAPTCHA.
+
+    The caller removes the returned listener when the booking attempt ends.
+    Response bodies are not read unless the site rejects the CAPTCHA.
+    """
+    responses: list[tuple[str, Any]] = []
+
+    def record(response: Any) -> None:
+        if response.request.resource_type not in {"xhr", "fetch"}:
+            return
+        if urlsplit(response.url).path not in _CAPTCHA_DIAGNOSTIC_PATHS:
+            return
+        responses.append((datetime.now().isoformat(timespec="milliseconds"), response))
+        if len(responses) > 30:
+            del responses[:-30]
+
+    page.on("response", record)
+    return responses, record
+
+
+def _safe_captcha_diagnostic_text(value: str) -> str:
+    """Retain a short server message without copying contact data or tokens."""
+    value = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d)", "[phone]", value)
+    value = re.sub(r"[A-Za-z0-9_+./=-]{24,}", "[token]", value)
+    return value[:240]
+
+
+def _summarize_captcha_api_payload(payload: Any, correlation_key: bytes) -> dict[str, Any]:
+    """Record business status and token *correlation*, never raw API values."""
+    summary: dict[str, Any] = {"jsonType": type(payload).__name__}
+    if not isinstance(payload, dict):
+        return summary
+    summary["fieldNames"] = sorted(str(k) for k in payload)[:40]
+    for container_name, container in (
+        ("root", payload),
+        ("data", payload.get("data")),
+        ("result", payload.get("result")),
+        ("error", payload.get("error")),
+    ):
+        if not isinstance(container, dict):
+            if container_name != "root":
+                summary[f"{container_name}Type"] = type(container).__name__
+            continue
+        if container_name != "root":
+            summary[f"{container_name}FieldNames"] = sorted(str(k) for k in container)[:40]
+        for field in _CAPTCHA_DIAGNOSTIC_FIELDS:
+            value = container.get(field)
+            if isinstance(value, (str, int, float, bool)):
+                summary[f"{container_name}.{field}"] = (
+                    _safe_captcha_diagnostic_text(value) if isinstance(value, str) else value
+                )
+        for field in _CAPTCHA_TOKEN_FIELDS:
+            value = container.get(field)
+            if isinstance(value, str):
+                # A fresh, unsaved key makes this useful only for comparing
+                # check/submit values inside *this* diagnostic snapshot.
+                summary[f"{container_name}.{field}"] = {
+                    "type": "str",
+                    "length": len(value),
+                    "correlation": hmac.new(
+                        correlation_key, value.encode("utf-8"), hashlib.sha256,
+                    ).hexdigest()[:16],
+                }
+    return summary
+
+
+async def _captcha_network_diagnostics(
+    responses: list[tuple[str, Any]], correlation_key: bytes,
+) -> list[dict[str, Any]]:
+    """Read CAPTCHA/order API outcomes only after an invalid-captcha failure."""
+    events: list[dict[str, Any]] = []
+    for captured_at, response in responses[-12:]:
+        try:
+            request = response.request
+            event: dict[str, Any] = {
+                "capturedAt": captured_at,
+                "method": request.method,
+                "httpStatus": response.status,
+                "path": urlsplit(response.url).path,
+            }
+        except Exception as exc:
+            events.append({"eventDiagnosticError": type(exc).__name__})
+            continue
+        if request.method == "POST":
+            try:
+                event["request"] = _summarize_captcha_api_payload(
+                    request.post_data_json, correlation_key,
+                )
+            except Exception as exc:
+                event["requestDiagnosticError"] = type(exc).__name__
+        try:
+            headers = request.headers
+            for header_name in ("authorization", "cookie"):
+                value = headers.get(header_name)
+                if value:
+                    event[f"{header_name}Correlation"] = hmac.new(
+                        correlation_key, value.encode("utf-8"), hashlib.sha256,
+                    ).hexdigest()[:16]
+        except Exception as exc:
+            event["sessionDiagnosticError"] = type(exc).__name__
+        try:
+            payload = await asyncio.wait_for(response.json(), timeout=1.5)
+            event["response"] = _summarize_captcha_api_payload(payload, correlation_key)
+        except Exception as exc:
+            event["responseDiagnosticError"] = type(exc).__name__
+        events.append(event)
+    return events
+
+
+async def solve_booking_captcha(
+    page: Page, click_solver, cfg: AppConfig,
+    network_responses: list[tuple[str, Any]],
+) -> BookingResult | None:
     """Solve the click-captcha that appears after submitting a booking.
 
     Screenshots the captcha image, sends it to click_solver.solve_click() to get
@@ -1042,38 +1167,10 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
     # signal (it fires before the popup even navigates to its tradeNo URL), so we
     # use it to STOP touching the captcha instead of re-clicking an accepted one.
     baseline_pages = len(ctx.pages)
-    # Keep only endpoint metadata for XHR/fetch responses produced while the
-    # click widget is active. This distinguishes a failed point check from a
-    # successful widget check followed by failed business-form verification,
-    # without persisting request bodies, credentials, or captcha tokens.
-    network_events: list[dict[str, Any]] = []
-
-    def _record_response(response) -> None:
-        request = response.request
-        if request.resource_type not in {"xhr", "fetch"}:
-            return
-        parsed = urlsplit(response.url)
-        event: dict[str, Any] = {
-            "method": request.method,
-            "status": response.status,
-            "path": parsed.path,
-        }
-        if parsed.path.endswith("/reservation/order/submit"):
-            try:
-                payload = request.post_data_json
-                if isinstance(payload, dict):
-                    event["payloadKeys"] = sorted(payload)
-                    for key, value in payload.items():
-                        if "captcha" in key.lower():
-                            event[f"{key}Type"] = type(value).__name__
-                            event[f"{key}Length"] = len(value) if isinstance(value, str) else None
-            except Exception as exc:
-                event["payloadDiagnosticError"] = str(exc)
-        network_events.append(event)
-        if len(network_events) > 30:
-            del network_events[:-30]
-
-    page.on("response", _record_response)
+    # The caller started capture before the form's initial submit, so the
+    # first captcha/get response is available as well as check/order submit.
+    # The normal booking path has no response-body work or diagnostic disk I/O.
+    correlation_key = secrets.token_bytes(32)
 
     async def _accepted() -> str | None:
         """Return the name of whichever acceptance signal is present, else None."""
@@ -1266,8 +1363,14 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                 if error_text:
                     if "验证码非法校验" in error_text:
                         client_state = await _captcha_client_state(page)
+                        try:
+                            network_events = await _captcha_network_diagnostics(
+                                network_responses, correlation_key,
+                            )
+                        except Exception as exc:
+                            network_events = [{"diagnosticError": type(exc).__name__}]
                         log.warning(
-                            "Captcha rejection client state: %s; recent XHR/fetch: %s",
+                            "Captcha rejection client state: %s; redacted API outcomes: %s",
                             client_state,
                             network_events[-8:],
                         )
@@ -1279,7 +1382,7 @@ async def solve_booking_captcha(page: Page, click_solver, cfg: AppConfig) -> Boo
                             geometry=geometry,
                             error_text=error_text,
                             client_state=client_state,
-                            network_events=network_events[-30:],
+                            network_events=network_events,
                         )
                         await _dump_post_submit_diagnostics(page, "captcha_invalid")
                     return BookingResult(False, f"Booking rejected by site: {error_text}", {"url": page.url})

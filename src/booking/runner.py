@@ -18,6 +18,7 @@ from .booking_flow import (
     select_booking_date,
     select_court_time,
     solve_booking_captcha,
+    start_captcha_network_capture,
 )
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
 from .captcha import ManualCaptchaSolver
@@ -429,6 +430,7 @@ def _is_site_rejection(result: BookingResult) -> bool:
 # re-submitting only deepens the throttle, so this is terminal, not a retry.
 _CAPTCHA_RATE_LIMIT_TEXT = "验证码次数超出限制"
 _CAPTCHA_INVALID_TEXT = "验证码非法校验"
+_DAILY_BOOKING_LIMIT_TEXT = "每天只能预约2次"
 
 
 def _is_captcha_rate_limited(result: BookingResult) -> bool:
@@ -439,6 +441,17 @@ def _is_captcha_rate_limited(result: BookingResult) -> bool:
 def _is_invalid_captcha_rejection(result: BookingResult) -> bool:
     """True when PKU rejected the submitted click coordinates."""
     return not result.success and _CAPTCHA_INVALID_TEXT in result.message
+
+
+def _daily_booking_limit_result(result: BookingResult) -> BookingResult | None:
+    """Turn the site's two-bookings-per-account limit into a terminal result."""
+    if result.success or _DAILY_BOOKING_LIMIT_TEXT not in result.message:
+        return None
+    return BookingResult(
+        False,
+        "Daily booking limit reached (2 courts per account); no further attempts.",
+        {**result.details, "reason": "daily_booking_limit", "site_message": result.message},
+    )
 
 
 # Safety cap on how many times we refresh and re-walk the priority list. The
@@ -570,35 +583,42 @@ async def _attempt_book_from_priority_list(
             True, HINT_AFTER_BOOKING_FORM,
             {"stopped_at": "after_court_selection", "final_url": page.url},
         ), chosen_hour
-    with cfg.profiler.span("agree_and_submit_booking"):
-        submit_error = await agree_and_submit_booking(page, cfg)
-    if submit_error is not None:
-        return page, submit_error, chosen_hour
+    network_responses, response_listener = start_captcha_network_capture(page)
+    reservation_page = page
+    try:
+        with cfg.profiler.span("agree_and_submit_booking"):
+            submit_error = await agree_and_submit_booking(page, cfg)
+        if submit_error is not None:
+            return page, submit_error, chosen_hour
 
-    rejection = await check_booking_rejection(page)
-    if rejection is not None:
-        return page, rejection, chosen_hour
-
-    # Stage 5: click-captcha (if it appeared).
-    if await page.locator(".verifybox").first.is_visible():
-        if cfg.debug or click_solver is None:
-            return page, BookingResult(
-                True,
-                "Click-captcha appeared (请完成安全验证). Debug mode — solve it manually or close the browser.",
-                {"stopped_at": "captcha"},
-            ), chosen_hour
-        with cfg.profiler.span("solve_booking_captcha"):
-            captcha_err = await solve_booking_captcha(page, click_solver, cfg)
-        if captcha_err is not None:
-            return page, captcha_err, chosen_hour
         rejection = await check_booking_rejection(page)
         if rejection is not None:
             return page, rejection, chosen_hour
 
-    # Stage 6: confirm payment (may switch page to a new trade tab).
-    with cfg.profiler.span("confirm_payment"):
-        page, result = await confirm_payment(page, cfg)
-    return page, result, chosen_hour
+        # Stage 5: click-captcha (if it appeared).
+        if await page.locator(".verifybox").first.is_visible():
+            if cfg.debug or click_solver is None:
+                return page, BookingResult(
+                    True,
+                    "Click-captcha appeared (请完成安全验证). Debug mode — solve it manually or close the browser.",
+                    {"stopped_at": "captcha"},
+                ), chosen_hour
+            with cfg.profiler.span("solve_booking_captcha"):
+                captcha_err = await solve_booking_captcha(
+                    page, click_solver, cfg, network_responses,
+                )
+            if captcha_err is not None:
+                return page, captcha_err, chosen_hour
+            rejection = await check_booking_rejection(page)
+            if rejection is not None:
+                return page, rejection, chosen_hour
+
+        # Stage 6: confirm payment (may switch page to a new trade tab).
+        with cfg.profiler.span("confirm_payment"):
+            page, result = await confirm_payment(page, cfg)
+        return page, result, chosen_hour
+    finally:
+        reservation_page.remove_listener("response", response_listener)
 
 
 async def run(
@@ -705,6 +725,12 @@ async def run(
                     # sold out. Refreshing won't help (the data was just fetched).
                     if chosen_hour is None:
                         out = result
+                        break
+
+                    daily_limit = _daily_booking_limit_result(result)
+                    if daily_limit is not None:
+                        log.info("Daily booking limit reached for this account; stopping worker.")
+                        out = daily_limit
                         break
 
                     if _is_site_rejection(result):
