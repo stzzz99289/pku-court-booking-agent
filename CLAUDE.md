@@ -185,8 +185,10 @@ accepted; if an established user still returns zero rows, the webapp preserves
 that user's previous cache instead of erasing it. Images are exposed only
 through the authenticated webapp.
 
-**Order cancellation.** The Orders page offers Cancel only for active, paid,
-future orders. An authenticated POST starts a per-order job under the shared
+**Order cancellation.** The Orders page offers Cancel only for active, paid
+orders whose slot has not started in PKU time, including later today. The server
+computes eligibility so a phone's timezone cannot change the rule. An
+authenticated POST starts a per-order job under the shared
 booking/profile lock. The server rechecks the cached order and matching account,
 then uses the mobile order card's cancel control, confirms its popover, verifies
 the exact order ID on the site's refund page, and submits once. Never retry an

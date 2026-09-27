@@ -11,7 +11,10 @@ from unittest.mock import patch
 
 from src.booking.orders import Order
 from web.backend.jobs import Job
-from web.backend.order_cache import OrderCacheService, compute_next_order_refresh
+from web.backend.order_cache import (
+    PKU_TIMEZONE, OrderCacheService, compute_next_order_refresh,
+    order_is_cancellable,
+)
 
 
 class OrderCacheTests(unittest.TestCase):
@@ -44,11 +47,13 @@ class OrderCacheTests(unittest.TestCase):
     def test_only_active_paid_future_order_is_cancellable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service = OrderCacheService(Path(directory) / "orders_cache.json")
-            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            tomorrow = (datetime.now(PKU_TIMEZONE) + timedelta(days=1)).strftime("%Y-%m-%d")
             service._write_cache({"orders": [
                 {"user": "stz", "order_no": "TARGET", "use_date": tomorrow,
+                 "court_and_time": "1号 20:00-21:00",
                  "pay_status": "已支付", "order_status": "正常"},
                 {"user": "zy", "order_no": "OTHER", "use_date": tomorrow,
+                 "court_and_time": "3号 21:00-22:00",
                  "pay_status": "已支付", "order_status": "已取消"},
             ], "errors": []})
             self.assertIsNotNone(service.cancellable_order("stz", "TARGET"))
@@ -60,6 +65,17 @@ class OrderCacheTests(unittest.TestCase):
             self.assertEqual(marked["order_status"], "已取消")
             self.assertEqual(marked["pay_status"], "退款中")
             self.assertEqual(marked["cancel_state"], "canceled")
+
+    def test_today_later_slot_is_cancellable_but_started_slot_is_not(self) -> None:
+        now = datetime(2026, 9, 27, 10, 30, tzinfo=PKU_TIMEZONE)
+        order = {
+            "use_date": "2026-09-27", "court_and_time": "1号 20:00-21:00",
+            "pay_status": "已支付", "order_status": "正常",
+        }
+        self.assertTrue(order_is_cancellable(order, now))
+        self.assertFalse(order_is_cancellable({**order, "court_and_time": "1号 09:00-10:00"}, now))
+        self.assertFalse(order_is_cancellable({**order, "court_and_time": "unknown"}, now))
+        self.assertFalse(order_is_cancellable({**order, "order_status": "已取消"}, now))
 
 
 class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
@@ -151,11 +167,13 @@ class OrderCacheRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_job_is_deduplicated_and_marks_only_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service = OrderCacheService(Path(directory) / "orders_cache.json")
-            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            tomorrow = (datetime.now(PKU_TIMEZONE) + timedelta(days=1)).strftime("%Y-%m-%d")
             service._write_cache({"orders": [
                 {"user": "stz", "order_no": "TARGET", "use_date": tomorrow,
+                 "court_and_time": "1号 20:00-21:00",
                  "pay_status": "已支付", "order_status": "正常"},
                 {"user": "zy", "order_no": "OTHER", "use_date": tomorrow,
+                 "court_and_time": "3号 21:00-22:00",
                  "pay_status": "已支付", "order_status": "正常"},
             ], "errors": []})
             base = SimpleNamespace(users=[SimpleNamespace(name="stz")])

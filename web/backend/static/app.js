@@ -197,10 +197,9 @@ function renderOrderCards(orders) {
 }
 
 function canCancelOrder(order) {
-  const useDate = String(order.use_date ?? "").replaceAll(/\D/g, "").slice(0, 8);
-  return useDate.length === 8 && useDate > localDateKey(new Date())
-    && order.pay_status === "已支付" && order.order_status === "正常"
-    && order.cancel_state !== "canceled";
+  // The server compares the full slot start against PKU local time, so this
+  // stays correct even when a phone is in a different timezone.
+  return order.can_cancel === true;
 }
 
 function renderCancelControl(order) {

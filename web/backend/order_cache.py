@@ -4,8 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,28 @@ ORDER_CACHE_FILE = DATA_DIR / "orders_cache.json"
 ORDER_PROOF_DIR = DATA_DIR / "order_proofs"
 ORDER_REFRESH_HOUR = 13
 DEFAULT_ORDER_LIMIT = 10
+PKU_TIMEZONE = timezone(timedelta(hours=8))
+_SLOT_START_PATTERN = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)")
+
+
+def order_is_cancellable(order: dict[str, Any], now: datetime | None = None) -> bool:
+    """Use the actual court start instant in PKU time, not just its date."""
+    if (
+        order.get("pay_status") != "已支付"
+        or order.get("order_status") != "正常"
+        or order.get("cancel_state") == "canceled"
+    ):
+        return False
+    use_date = _date_value(str(order.get("use_date", "")))
+    start_match = _SLOT_START_PATTERN.search(str(order.get("court_and_time", "")))
+    if use_date is None or start_match is None:
+        return False
+    starts_at = datetime(
+        use_date.year, use_date.month, use_date.day,
+        int(start_match.group(1)), int(start_match.group(2)),
+        tzinfo=PKU_TIMEZONE,
+    )
+    return starts_at > (now or datetime.now(PKU_TIMEZONE)).astimezone(PKU_TIMEZONE)
 
 
 def compute_next_order_refresh(now: datetime | None = None) -> float:
@@ -92,6 +115,7 @@ class OrderCacheService:
         data = self.load_cache()
         data["orders"] = self.proofs.attach_urls(data["orders"])
         for order in data["orders"]:
+            order["can_cancel"] = order_is_cancellable(order)
             key = (str(order.get("user", "")), str(order.get("order_no", "")))
             job = get_job_manager().get(self.cancel_jobs.get(key, ""))
             if job and job.status in {"pending", "running"}:
@@ -108,17 +132,11 @@ class OrderCacheService:
         }
 
     def cancellable_order(self, user: str, order_no: str) -> dict[str, Any] | None:
-        """Allow only visible, paid, normal, future orders to be canceled."""
+        """Allow only visible, paid, normal orders with unstarted slots."""
         for order in self.load_cache()["orders"]:
             if (order.get("user"), order.get("order_no")) != (user, order_no):
                 continue
-            use_date = _date_value(str(order.get("use_date", "")))
-            if (
-                order.get("pay_status") == "已支付"
-                and order.get("order_status") == "正常"
-                and order.get("cancel_state") != "canceled"
-                and use_date is not None and use_date > date.today()
-            ):
+            if order_is_cancellable(order):
                 return order
         return None
 
@@ -279,6 +297,8 @@ class OrderCacheService:
             "count": len(combined),
         }
         result["orders"] = self.proofs.attach_urls(result["orders"])
+        for order in result["orders"]:
+            order["can_cancel"] = order_is_cancellable(order)
         self._write_cache(result)
         for order in canceled_previous:
             self.proofs.remove(str(order.get("user", "")), str(order.get("order_no", "")))
