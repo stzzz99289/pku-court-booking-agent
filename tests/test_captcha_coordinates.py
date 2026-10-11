@@ -61,6 +61,9 @@ class CaptchaCoordinateTests(unittest.TestCase):
             def __init__(self, payload):
                 self.post_data_json = payload
 
+            async def all_headers(self):
+                return self.headers
+
         class Response:
             status = 200
 

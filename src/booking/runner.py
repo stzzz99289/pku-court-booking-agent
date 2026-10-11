@@ -22,6 +22,7 @@ from .booking_flow import (
 )
 from .browser import dispose_context, launch_persistent_context, wait_until_user_closes_window
 from .captcha import ManualCaptchaSolver
+from .captcha_observation import attach as attach_captcha_observation
 from .config import AppConfig, UserConfig, WorkerConfig, load_config
 from .diagnostics import dump_crash_diagnostics
 from .login import ensure_logged_in, session_token_expired
@@ -642,9 +643,11 @@ async def run(
     page = None
     out: BookingResult | None = None
     stage = "browser_launch"
+    captcha_observation = None
     try:
         with cfg.profiler.span("browser_launch"):
             context, _ = await launch_persistent_context(cfg)
+        captcha_observation = attach_captcha_observation(context, cfg)
         stage = "open_page"
         page = context.pages[0] if context.pages else await context.new_page()
         stage = "initial_navigation"
@@ -679,6 +682,8 @@ async def run(
                 invalid_captcha_retries = 0
                 for refresh_attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
                     stage = f"booking_attempt_{refresh_attempt}"
+                    if captcha_observation is not None:
+                        captcha_observation.attempt = refresh_attempt
                     if refresh_attempt > 1:
                         log.info("Refresh #%d: re-checking start_time_list from the top.",
                                  refresh_attempt - 1)
@@ -800,6 +805,11 @@ async def run(
         if page is not None:
             await wait_until_user_closes_window(cfg, page)
         if context is not None:
+            if captcha_observation is not None:
+                try:
+                    await captcha_observation.finish(out, stage)
+                except Exception as exc:
+                    log.warning("CAPTCHA observation finish failed: %s", type(exc).__name__)
             await dispose_context(context)
 
 

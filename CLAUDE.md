@@ -172,6 +172,18 @@ generation. Scheduled profiling files retain a
 seven-day window. Crash evidence and CAPTCHA diagnostics are never pruned
 automatically.
 
+**Temporary CAPTCHA observation.** See
+`docs/captcha_verification_investigation.md` for the 2026-10-12 experiment.
+A private `debugging/investigations/captcha-verification/YYYYMMDD/enable.json`
+marker enables passive capture only on that Beijing scheduled-run date.
+All workers share an unsaved fingerprint key, with successful and rejected
+request summaries written locally after all workers finish. Optional generation
+checks use `requirements-debug.txt` and a dated, verified public-asset study.
+No marker means no capture; never upload raw CAPTCHA/session values or debug
+artifacts to the server. Full-page failure dumps belong in
+`debugging/post-submit/YYYYMMDD/`, never the debugging root. Preserve unresolved
+crash/CAPTCHA evidence until the user explicitly approves removal.
+
 **Order cache.** The server refreshes all users' paid orders every day at
 13:00 and persists the combined result in `data/orders_cache.json`. The Orders
 page loads this cache immediately, shows its last update time, and can

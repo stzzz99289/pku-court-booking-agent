@@ -28,6 +28,7 @@ from typing import Any
 
 from src.booking import runner
 from src.booking.config import AppConfig
+from src.booking.captcha_observation import ObservationRun
 from src.booking.result import BookingResult
 from web.backend.config_loader import load_set, per_user_config
 from web.backend.jobs import get_booking_lock, redact_sensitive_text, redact_sensitive_value
@@ -291,6 +292,12 @@ class Scheduler:
         results: list[BookingResult] = []
         worker_profiles: list[dict[str, Any]] = []
         errors: list[str] = []
+        observation = ObservationRun.prepare(started_at)
+        if observation is not None:
+            observation.expected_worker_count = len(cfg.workers)
+        observation_token = observation.activate() if observation is not None else None
+        if observation is not None:
+            log.info("scheduler: dated passive CAPTCHA observation enabled.")
         try:
             results, worker_profiles = await self._run_workers(cfg)
             log.info("scheduler: run finished. %d/%d worker(s) succeeded.",
@@ -299,6 +306,9 @@ class Scheduler:
             errors.append(redact_sensitive_text(f"{type(e).__name__}: {e}"))
             log.exception("scheduler: run aborted with exception.")
         finally:
+            if observation is not None:
+                ObservationRun.deactivate(observation_token)
+                observation.write()
             for lg in (booking_log, my_log):
                 lg.removeHandler(file_h)
                 lg.removeHandler(ring_h)

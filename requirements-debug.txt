@@ -1,0 +1,2 @@
+# Temporary CAPTCHA investigation only; not required by normal booking.
+cryptography>=41.0

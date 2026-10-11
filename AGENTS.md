@@ -23,6 +23,9 @@ guidance changes.
 - The persistent profiles under `.browser_profile/`, local configs, `data/`,
   and `debugging/` may contain sensitive or run-specific state and must remain
   uncommitted.
+- For temporary CAPTCHA diagnostics, follow
+  `docs/captcha_verification_investigation.md`: date-scoped activation,
+  secret-free local summaries, and preservation of unresolved crash evidence.
 - Validate changes with the narrowest relevant command first. For a live
   booking smoke test, use:
 

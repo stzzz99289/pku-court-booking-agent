@@ -66,10 +66,12 @@ async def _dump_post_submit_diagnostics(page: Page, label: str) -> Path | None:
     underlying booking failure).
     """
     try:
-        _DEBUG_DUMP_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.now()
+        dump_dir = _DEBUG_DUMP_DIR / "post-submit" / now.strftime("%Y%m%d")
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        stamp = now.strftime("%Y%m%d_%H%M%S_%f")
         safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)[:60]
-        base = _DEBUG_DUMP_DIR / f"{stamp}_{safe_label}"
+        base = dump_dir / f"{stamp}_{safe_label}"
         try:
             await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
         except Exception as e:
@@ -1023,8 +1025,12 @@ _CAPTCHA_DIAGNOSTIC_PATHS = (
     "/venue-server/api/captcha/check",
     "/venue-server/api/reservation/order/submit",
 )
-_CAPTCHA_DIAGNOSTIC_FIELDS = ("code", "status", "success", "msg", "message", "error", "errorCode")
-_CAPTCHA_TOKEN_FIELDS = ("captchaToken", "captchaVerification")
+_CAPTCHA_DIAGNOSTIC_FIELDS = (
+    "code", "status", "success", "msg", "message", "error", "errorCode", "repCode", "repMsg",
+)
+_CAPTCHA_TOKEN_FIELDS = (
+    "token", "captchaToken", "captchaVerification", "pointJson", "secretKey", "clientUid",
+)
 
 
 def start_captcha_network_capture(page: Page) -> tuple[list[tuple[str, Any]], Any]:
@@ -1066,6 +1072,8 @@ def _summarize_captcha_api_payload(payload: Any, correlation_key: bytes) -> dict
         ("data", payload.get("data")),
         ("result", payload.get("result")),
         ("error", payload.get("error")),
+        ("data.repData", (payload.get("data") or {}).get("repData")
+         if isinstance(payload.get("data"), dict) else None),
     ):
         if not isinstance(container, dict):
             if container_name != "root":
@@ -1119,8 +1127,8 @@ async def _captcha_network_diagnostics(
             except Exception as exc:
                 event["requestDiagnosticError"] = type(exc).__name__
         try:
-            headers = request.headers
-            for header_name in ("authorization", "cookie"):
+            headers = await asyncio.wait_for(request.all_headers(), timeout=1.0)
+            for header_name in ("authorization", "cookie", "cgauthorization", "cgappauthorization"):
                 value = headers.get(header_name)
                 if value:
                     event[f"{header_name}Correlation"] = hmac.new(
