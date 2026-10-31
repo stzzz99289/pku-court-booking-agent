@@ -24,12 +24,14 @@ from .browser import dispose_context, launch_persistent_context, wait_until_user
 from .captcha import ManualCaptchaSolver
 from .captcha_observation import attach as attach_captcha_observation
 from .config import AppConfig, UserConfig, WorkerConfig, load_config
+from .date_labels import date_button_matches, parse_booking_date
 from .diagnostics import dump_crash_diagnostics
 from .login import ensure_logged_in, session_token_expired
 from .orders import Order, fetch_user_orders, format_orders_table
 from .pipeline import HINT_AFTER_BOOKING_FORM, HINT_AFTER_NAVIGATE, login_automation_ready, submit_flow_ready
 from .result import BookingResult
 from .session_verification import mark_session_verified
+from .site_constants import BOOKING_DATE_BUTTON_SELECTOR
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +138,7 @@ async def _ensure_date_buttons_visible(page) -> bool:
     """
     for i in range(1, _DATE_BUTTONS_ATTEMPTS + 1):
         try:
-            await page.locator(".date_box > div").first.wait_for(
+            await page.locator(BOOKING_DATE_BUTTON_SELECTOR).first.wait_for(
                 state="visible", timeout=_DATE_BUTTONS_TIMEOUT_MS,
             )
             if i > 1:
@@ -271,18 +273,10 @@ _DATE_REFRESH_RELOAD_TIMEOUT_MS = 5_000   # cap the navigation (HTML) per attemp
 _DATE_REFRESH_RESPONSE_TIMEOUT_MS = 12_000  # patiently wait the congested day/info XHR
 
 
-def _format_target_date_label(date_str: str) -> str | None:
-    """YYYYMMDD → 'MM月DD日' as displayed on the .date_box buttons, or None if unparseable."""
-    s = (date_str or "").strip()
-    if len(s) < 8 or not s[:8].isdigit():
-        return None
-    return f"{s[4:6]}月{s[6:8]}日"
-
-
 async def _read_date_button_texts(page) -> list[str]:
     """Atomically read the current date row so a Vue re-render cannot strand nth(i)."""
     try:
-        texts = await page.locator(".date_box > div").all_inner_texts()
+        texts = await page.locator(BOOKING_DATE_BUTTON_SELECTOR).all_inner_texts()
     except Exception as exc:
         log.warning("Date row changed while reading it (%s); treating as transient.", exc)
         return []
@@ -292,7 +286,7 @@ async def _read_date_button_texts(page) -> list[str]:
 async def _wait_for_date_buttons_after_refresh(page) -> bool:
     """Wait for the post-fire date row without issuing another competing reload."""
     try:
-        await page.locator(".date_box > div").first.wait_for(
+        await page.locator(BOOKING_DATE_BUTTON_SELECTOR).first.wait_for(
             state="visible", timeout=_DATE_REFRESH_RESPONSE_TIMEOUT_MS,
         )
         return True
@@ -311,7 +305,7 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
     subsequent `select_booking_date` will then return a clear error listing
     what's actually available, instead of looping silently.
     """
-    target = _format_target_date_label(cfg.date)
+    target = parse_booking_date(cfg.date)
     for attempt in range(1, _MAX_DATE_REFRESH_ATTEMPTS + 1):
         # Either the reload itself or the response-wait can raise PlaywrightTimeoutError
         # under load (observed 2026-05-18, all workers crashed). Treat that as
@@ -343,7 +337,7 @@ async def _refresh_until_target_date_visible(page, cfg: AppConfig) -> None:
             return
 
         visible = await _read_date_button_texts(page) if buttons_visible else []
-        if any(target in t for t in visible):
+        if any(date_button_matches(text, target) for text in visible):
             log.info("Schedule data loaded after refresh — target date %s visible (attempt %d/%d).",
                      target, attempt, _MAX_DATE_REFRESH_ATTEMPTS)
             return

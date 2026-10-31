@@ -17,6 +17,9 @@ BASE_URL = "https://epe.pku.edu.cn/venue/home"
 MOBILE_ORDERS_PATH = "/venue/mobileOrders"
 MOBILE_ORDER_CARD_SELECTOR = "li.buddyItem"
 
+# Date buttons only; exclude the separate next-release notice above the row.
+BOOKING_DATE_BUTTON_SELECTOR = ".date_box > div"
+
 # Known venues, keyed by the numeric ID in
 # https://epe.pku.edu.cn/venue/venue-reservation/<id>. The webapp uses these
 # names in its UI; YAML configs keep the integer ID as the source of truth.

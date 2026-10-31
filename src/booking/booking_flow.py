@@ -16,7 +16,9 @@ from urllib.parse import urlsplit
 from playwright.async_api import Page
 
 from .config import AppConfig
+from .date_labels import date_button_matches, parse_booking_date
 from .result import BookingResult
+from .site_constants import BOOKING_DATE_BUTTON_SELECTOR
 
 log = logging.getLogger(__name__)
 
@@ -173,18 +175,15 @@ def parse_day_info(payload: dict) -> dict[int, list[int]]:
 async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | None:
     """Click the matching date button and wait for the schedule API to respond.
 
-    Converts cfg.date (YYYYMMDD) → "MM月DD日" and matches against .date_box buttons.
+    Matches cfg.date (YYYYMMDD) against current MM/DD or legacy MM月DD日 labels.
     Returns None on success, BookingResult error otherwise.
     """
-    # Parse YYYYMMDD → "MM月DD日" for matching against button text.
-    date_str = cfg.date.strip()
-    try:
-        target = f"{date_str[4:6]}月{date_str[6:8]}日"
-    except IndexError:
+    target = parse_booking_date(cfg.date)
+    if target is None:
         return BookingResult(False, f"Invalid date format {cfg.date!r}. Expected YYYYMMDD.", {})
 
     # Find the date buttons and click the matching one.
-    buttons = page.locator(".date_box > div")
+    buttons = page.locator(BOOKING_DATE_BUTTON_SELECTOR)
     count = await buttons.count()
     if count == 0:
         # An empty date box with an expired-token modal means the stored JWT
@@ -213,7 +212,7 @@ async def select_booking_date(page: Page, cfg: AppConfig) -> BookingResult | Non
         btn = buttons.nth(i)
         text = (await btn.inner_text()).strip()
         available.append(text)
-        if target in text:
+        if date_button_matches(text, target):
             # If the date is already selected (class "active"), the table is
             # already loaded — clicking it again won't fire an API request, so
             # skip the click to avoid a timeout on expect_response.
