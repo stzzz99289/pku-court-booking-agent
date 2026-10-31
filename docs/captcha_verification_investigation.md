@@ -1,6 +1,8 @@
-# CAPTCHA verification investigation — 2026-10-12 scheduled run
+# CAPTCHA verification investigation — October 12/13 scheduled runs
 
-Status: **root cause not confirmed**. Prepared on 2026-10-11 (Beijing time).
+Status: **root cause not confirmed**. Prepared on 2026-10-11; updated on
+2026-10-12 (Beijing time). October 12 did not execute a booking run; the next
+dated observation is enabled for October 13.
 This is a temporary observation experiment, not a CAPTCHA bypass or a change
 to the site's verification, booking priorities, retries, or worker concurrency.
 
@@ -180,17 +182,58 @@ is 200. Never claim definitive server internals from client-only evidence.
   CAPTCHA images, and full-page failure evidence preserved and categorized.
 - No private booking/account config changed; no server deployment required.
 
-## 5. October 12 result placeholder — NOT YET RUN
+## 5. October 12 findings — no booking executed
 
-- Actual start / finish / upload time: **pending**
-- Code commit and site asset hashes: **pending**
-- Diagnostic file / capture completeness: **pending**
-- Workers / successful bookings / sold-out / rate-limit / invalid errors: **pending**
-- Failed and successful request chains compared: **pending**
-- Token identity, reuse, generation and session findings: **pending**
-- Evidence-supported cause (or remaining uncertainty): **pending**
-- Narrow fix and validation plan: **pending**
-- Temporary capture disabled/removed after investigation: **pending**
+Checked at approximately 23:47 Beijing time on October 12:
+
+- The daily Windows task is enabled and Ready. LastRunTime is October 12
+  **12:01:12**, LastTaskResult is **2**, and the next trigger is October 13
+  **11:57:00**. The configuration is still 12:00 release / 180-second prep,
+  with 14 workers. No booking config or trigger was changed during this check.
+- `local_schedule.run_once()` returns 2 before starting the scheduler when
+  invoked outside the preparation window. It deliberately refuses to submit
+  late bookings. The current local task log also says:
+  `Outside the scheduled preparation window; no booking was attempted.`
+- That log's latest write is 13:58:47; the entry point truncates it on every
+  invocation. Therefore it is not a complete history and cannot establish why
+  the task was late or whether a later manual invocation replaced its log.
+  Do not claim that sleep/sign-out caused this without additional OS evidence.
+- Local `scheduled_last_run.json` and `.log` are still October 11's, as is the
+  server's report `started_at` (1791691021.3968258). A newer server file write
+  is not evidence of a new booking: routine sync can republish the old report.
+- No October 12 `run_*.json` exists in the investigation folder. Thus no new
+  CAPTCHA request chain, successful comparison, or invalid-verification result
+  exists to analyze. The invalid-verification root cause remains unconfirmed.
+
+The unsuccessful invocation's log/status are preserved privately under
+`debugging/investigations/captcha-verification/20261012/`. No live booking was
+launched to compensate for the missed run.
+
+## 6. October 13 follow-up — enabled, results pending
+
+The same passive diagnostics are enabled by the new private marker:
+
+```text
+debugging/investigations/captcha-verification/20261013/enable.json
+```
+
+Its contents are `{"enabled": true, "run_date": "20261013"}`. A fresh public
+asset study is saved in that date's `site-study/` folder. No code changes,
+extra task, retry/concurrency changes, or server restart are required.
+The existing daily task loads the observer automatically. October 14 remains
+disabled unless explicitly re-enabled with another dated marker.
+
+For October 13, keep the laptop awake and signed into Windows **before 11:57**;
+Win+L is fine, but sleep/sign-out is not. The current task neither wakes the
+laptop nor catches up on missed runs. Use the same analysis checklist in
+section 3, substituting `20261013` in the diagnostic paths.
+
+- Actual preparation / finish / upload time: **pending**
+- `run_<id>.json` and capture completeness: **pending**
+- Worker outcomes vs intermediate CAPTCHA business errors: **pending**
+- Successful/failed token, client-ID, session and generation comparison: **pending**
+- Evidence-supported cause, or exact remaining uncertainty: **pending**
+- Narrow fix / validation / capture removal: **pending**
 
 The scheduler does not edit this tracked document. Fill this section during
 human-requested analysis after the run. Diagnostics remain local and ignored
