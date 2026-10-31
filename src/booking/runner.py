@@ -675,7 +675,6 @@ async def run(
                 transient_attempts = 0
                 invalid_captcha_retries = 0
                 for refresh_attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
-                    stage = f"booking_attempt_{refresh_attempt}"
                     if captcha_observation is not None:
                         captcha_observation.attempt = refresh_attempt
                     if refresh_attempt > 1:
@@ -685,8 +684,10 @@ async def run(
                         # runs post-fire under contention after a slot was rejected,
                         # so it's on the critical path and worth measuring separately.
                         with cfg.profiler.span("renavigate_to_reservation"):
+                            stage = "retry_reservation_navigation"
                             await _navigate_to_reservation(page, cfg, login_solver)
 
+                    stage = f"booking_attempt_{refresh_attempt}"
                     page, result, chosen_hour = await _attempt_book_from_priority_list(
                         page, cfg, click_solver,
                     )
@@ -715,9 +716,8 @@ async def run(
                             "Transient failure (%s). Re-navigating (transient retry %d/%d).",
                             result.message, transient_attempts, _MAX_TRANSIENT_RETRIES,
                         )
-                        with cfg.profiler.span("renavigate_to_reservation"):
-                            stage = "retry_reservation_navigation"
-                            await _navigate_to_reservation(page, cfg, login_solver)
+                        # The next loop iteration already re-navigates before
+                        # selecting the date. Do not fetch the same page twice.
                         continue
 
                     # No hour in the list has any free court — every priority slot is

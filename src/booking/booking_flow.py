@@ -382,22 +382,23 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     #   reservation → someone else is mid-booking (orange, empty text — skip)
     court_rows = sched_table.locator("tbody tr")
 
+    # Read labels in one browser round-trip, preserving the actual tbody row
+    # indices (including placeholders). Reuse them in both selection paths.
+    row_labels = await _read_court_row_labels(court_rows)
+
     # JSON-cache fast path: the runner already picked which court_idx to click.
     # Walk only court rows (filtering out non-court rows like headers) and click
     # the row at that index directly. Skips the per-row class check.
     if cfg.target_court_index >= 0:
         with cfg.profiler.span("click_court_cell(cache)"):
-            court_row_indices: list[int] = []
-            for row_i in range(await court_rows.count()):
-                row = court_rows.nth(row_i)
-                first_cell = (await row.locator("td").nth(0).inner_text()).strip()
-                if re.match(r"\d+号", first_cell):
-                    court_row_indices.append(row_i)
+            court_row_indices = [
+                i for i, label in enumerate(row_labels) if re.match(r"\d+号", label)
+            ]
             if cfg.target_court_index < len(court_row_indices):
                 row_i = court_row_indices[cfg.target_court_index]
                 row = court_rows.nth(row_i)
                 target_cell = row.locator("td").nth(col_idx)
-                first_cell = (await row.locator("td").nth(0).inner_text()).strip()
+                first_cell = row_labels[row_i]
                 log.info("Clicking court %s at %s (JSON-cache court_idx=%d).",
                          first_cell, target_time, cfg.target_court_index)
                 await target_cell.click()
@@ -410,10 +411,9 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
     # plain row order so courts 1 & 2 are tried before court 0.
     free_courts: list[tuple[int, object, str]] = []  # (court_idx, target_cell, label)
     court_idx = 0
-    for row_i in range(await court_rows.count()):
+    for row_i, first_cell in enumerate(row_labels):
         row = court_rows.nth(row_i)
         cells = row.locator("td")
-        first_cell = (await cells.nth(0).inner_text()).strip()
         if not re.match(r"\d+号", first_cell):
             continue
         this_court_idx = court_idx
@@ -439,6 +439,13 @@ async def select_court_time(page: Page, cfg: AppConfig) -> BookingResult | None:
         False,
         f"No available courts at {target_time} (all sold or mid-reservation by other users).",
         {},
+    )
+
+
+async def _read_court_row_labels(court_rows) -> list[str]:
+    """Snapshot row labels atomically without one IPC call per court row."""
+    return await court_rows.evaluate_all(
+        "rows => rows.map(row => (row.cells[0]?.innerText || '').trim())"
     )
 
 
