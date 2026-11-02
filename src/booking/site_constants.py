@@ -16,6 +16,7 @@ BASE_URL = "https://epe.pku.edu.cn/venue/home"
 # desktop /orders page retains its horizontally scrolling table.
 MOBILE_ORDERS_PATH = "/venue/mobileOrders"
 MOBILE_ORDER_CARD_SELECTOR = "li.buddyItem"
+ORDERS_MINE_PATH = "/venue-server/api/orders/mine"
 
 # Date buttons only; exclude the separate next-release notice above the row.
 BOOKING_DATE_BUTTON_SELECTOR = ".date_box > div"

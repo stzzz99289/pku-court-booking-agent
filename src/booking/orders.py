@@ -4,8 +4,8 @@ The orders page renders a single iView table with these columns:
   序号, 订单类型/订单号, 预约场馆, 使用日期, 场地及使用时间,
   支付状态, 订单状态, 金额/支付方式, 下单时间, 操作
 
-We parse the DOM directly (no internal API contract required) and keep only
-rows whose 支付状态 (pay_status) is "已支付".
+We use the DOM for payment/status labels and pagination, supplementing blank
+display cells from the page's own order-list response by exact order number.
 """
 from __future__ import annotations
 
@@ -47,6 +47,7 @@ from .captcha import ManualCaptchaSolver
 from .config import AppConfig, UserConfig
 from .login import ensure_logged_in, session_token_expired
 from .session_verification import mark_session_verified
+from .site_constants import ORDERS_MINE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +105,72 @@ def _parse_row(user: str, cells: list[str]) -> Order | None:
         amount=cells[7],
         created_at=cells[8],
     )
+
+
+def _order_display_details(payload: Any) -> dict[str, dict[str, str]]:
+    """Retain only display fields, never the response's phone/user/session data."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("content") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    details: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        def text(key: str) -> str:
+            value = row.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
+        order_no = text("tradeNo")
+        if order_no:
+            details[order_no] = {
+                # Preserve the desktop's historical venue-filter value.
+                "venue": text("venueName") + text("siteName"),
+                "court_and_time": text("reservationDateDetail"),
+            }
+    return details
+
+
+def _apply_order_details(orders: list[Order], details: dict[str, dict[str, str]]) -> None:
+    for order in orders:
+        for field, value in details.get(order.order_no, {}).items():
+            if not getattr(order, field).strip() and value:
+                setattr(order, field, value)
+    incomplete = [o for o in orders if o.order_status == "正常"
+                  and (not o.venue.strip() or not o.court_and_time.strip())]
+    if incomplete:
+        raise RuntimeError(
+            f"Order query returned {len(incomplete)} active order(s) without venue "
+            "or court/time details; refusing to replace the cache with incomplete data."
+        )
+
+
+class _OrderDetailsCapture:
+    """Passively read responses already requested by this user's orders page."""
+
+    def __init__(self, base_url: str) -> None:
+        url = urlparse(base_url)
+        self.origin = (url.scheme, url.netloc)
+        self.details: dict[str, dict[str, str]] = {}
+        self.tasks: list[asyncio.Task] = []
+
+    def on_response(self, response) -> None:
+        url = urlparse(response.url)
+        if ((url.scheme, url.netloc) == self.origin and url.path == ORDERS_MINE_PATH
+                and response.request.method == "GET" and response.status == 200):
+            self.tasks.append(asyncio.create_task(self._read(response)))
+
+    async def _read(self, response) -> None:
+        try:
+            self.details.update(_order_display_details(await response.json()))
+        except Exception:
+            # Do not log the raw response, URL query, or authentication data.
+            log.warning("Could not read supplemental order display details.")
+
+    async def finish(self) -> None:
+        if self.tasks:
+            await asyncio.wait_for(asyncio.gather(*self.tasks), timeout=5.0)
 
 
 async def _scrape_orders_table(page: Page, user: str) -> list[Order]:
@@ -171,9 +238,11 @@ async def fetch_user_orders(
     solver = ManualCaptchaSolver() if cfg.debug else _default_login_solver()
     context, _ = await launch_persistent_context(cfg)
     page = context.pages[0] if context.pages else await context.new_page()
+    details = _OrderDetailsCapture(cfg.base_url)
     try:
         await _goto_with_retry(page, cfg.base_url)
         await ensure_logged_in(page, cfg, solver)
+        page.on("response", details.on_response)
         url = _orders_url(cfg)
         initial_rows: list[Order] = []
         for attempt in range(1, _ORDER_PAGE_ATTEMPTS + 1):
@@ -215,10 +284,19 @@ async def fetch_user_orders(
         orders = await _collect_paid_orders(
             page, user.name, limit, initial_rows=initial_rows,
         )
+        page.remove_listener("response", details.on_response)
+        await details.finish()
+        _apply_order_details(orders, details.details)
         if after_fetch is not None:
             await after_fetch(page, orders)
         return orders
     finally:
+        page.remove_listener("response", details.on_response)
+        for task in details.tasks:
+            if not task.done():
+                task.cancel()
+        if details.tasks:
+            await asyncio.gather(*details.tasks, return_exceptions=True)
         await dispose_context(context)
 
 

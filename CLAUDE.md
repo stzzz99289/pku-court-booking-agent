@@ -196,6 +196,11 @@ the next refresh. A transient empty table is polled and re-opened before being
 accepted; if an established user still returns zero rows, the webapp preserves
 that user's previous cache instead of erasing it. Images are exposed only
 through the authenticated webapp.
+If the site's desktop table leaves venue or court/time cells empty, the query
+supplements them from the page's own `/venue-server/api/orders/mine` response,
+matched by exact order number. Only the two display fields are retained; no
+extra API requests or raw response logging are added. Incomplete active orders
+fail the refresh for that user so the previous cache is preserved.
 
 **Order cancellation.** The Orders page offers Cancel only for active, paid
 orders whose slot has not started in PKU time, including later today. The server
